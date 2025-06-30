@@ -1,0 +1,56 @@
+services:
+  redis:
+    container_name: redis
+    image: valkey/valkey:8-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    networks:
+      - searxng
+    volumes:
+      - valkey-data2:/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+  searxng:
+    container_name: searxng
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    networks:
+      - searxng
+    ports:
+      # 设置 8081 端口
+      - 8081:8080
+    volumes:
+      - ./searx:/etc/searxng:rw
+      # 映射自定义的微信搜索引擎
+      - ./searx/engines/wechat.py:/usr/local/searxng/searx/engines/wechat.py
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8081
+      - UWSGI_WORKERS=${SEARXNG_UWSGI_WORKERS:-4}
+      - UWSGI_THREADS=${SEARXNG_UWSGI_THREADS:-4}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+networks:
+  searxng:
+
+volumes:
+  valkey-data2: 
