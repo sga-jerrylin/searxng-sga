@@ -72,9 +72,9 @@ try {
     git remote add origin https://github.com/sga-jerrylin/searxng-sga.git
     
     Write-Host ""
-    Write-Host "6. 推送到远程仓库..." -ForegroundColor Cyan
-    git branch -M main
-    git push -u origin main --force
+    Write-Host "6. 推送到远程仓库 (覆盖 master 分支)..." -ForegroundColor Cyan
+    git branch -M master
+    git push -u origin master --force
     
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green

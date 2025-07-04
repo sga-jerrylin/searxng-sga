@@ -9,8 +9,13 @@ https://github.com/sga-jerrylin/searxng-sga.git
 推送方法（请选择其中一种）：
 ========================================
 
-方法 1: 双击运行批处理文件
-- 直接双击 "quick_push.bat" 文件
+方法 1: 覆盖 master 分支（推荐）
+- 双击 "覆盖master分支.bat" 文件
+- 输入 "yes" 确认覆盖
+- 等待推送完成
+
+方法 2: 普通推送
+- 双击 "quick_push.bat" 文件
 - 等待推送完成
 
 方法 2: 在命令提示符中运行
@@ -30,8 +35,8 @@ git init
 git add .
 git commit -m "feat: 重大更新 - 完整的Windows兼容性和功能增强"
 git remote add origin https://github.com/sga-jerrylin/searxng-sga.git
-git branch -M main
-git push -u origin main --force
+git branch -M master
+git push -u origin master --force
 
 ========================================
 推送内容说明：

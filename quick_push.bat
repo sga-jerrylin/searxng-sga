@@ -23,9 +23,9 @@ git remote remove origin 2>nul
 git remote add origin https://github.com/sga-jerrylin/searxng-sga.git
 
 echo.
-echo 步骤 5: 推送到 GitHub
-git branch -M main
-git push -u origin main --force
+echo 步骤 5: 推送到 GitHub (覆盖 master 分支)
+git branch -M master
+git push -u origin master --force
 
 echo.
 echo ==========================================
