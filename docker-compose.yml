@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  redis:
+    container_name: redis
+    image: redis:alpine
+    command: redis-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    networks:
+      - searxng-net
+    volumes:
+      - redis-data:/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+  searxng:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: searxng-dify
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./searx/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-logs:/var/log/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+      - SEARXNG_BIND_ADDRESS=0.0.0.0
+      - SEARXNG_PORT=8888
+      - SEARXNG_REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/usr/local/searxng
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - searxng-net
+      - dify-network  # 用于连接Dify
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+volumes:
+  redis-data:
+  searxng-logs:
+
+networks:
+  searxng-net:
+    driver: bridge
+  dify-network:
+    external: true  # 外部网络，需要预先创建 
