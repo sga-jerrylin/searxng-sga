@@ -339,7 +339,7 @@ def initialize(settings_engines=None, settings_outgoing=None):
     # default parameters for AsyncHTTPTransport
     # see https://github.com/encode/httpx/blob/e05a5372eb6172287458b37447c30f650047e1b8/httpx/_transports/default.py#L108-L121  # pylint: disable=line-too-long
     default_params = {
-        'enable_http': False,
+        'enable_http': True,  # 启用HTTP协议，支持HTTP和HTTPS请求
         'verify': settings_outgoing['verify'],
         'enable_http2': settings_outgoing['enable_http2'],
         'max_connections': settings_outgoing['pool_connections'],

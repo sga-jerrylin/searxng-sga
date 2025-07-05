@@ -818,6 +818,7 @@ engines:
     display_type: ["infobox"]
     tests: *tests_infobox
     categories: [general]
+    disabled: true
 
   - name: duckduckgo
     engine: duckduckgo
@@ -1763,6 +1764,7 @@ engines:
   - name: radio browser
     engine: radio_browser
     shortcut: rb
+    disabled: true
 
   - name: reddit
     engine: reddit

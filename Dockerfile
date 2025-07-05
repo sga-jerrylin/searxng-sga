@@ -32,6 +32,7 @@ COPY tests/ ./tests/
 
 # 复制配置文件
 COPY container/config/ ./.template/
+COPY limiter.toml /etc/searxng/limiter.toml
 
 # 创建启动脚本
 RUN echo '#!/bin/bash\n\
@@ -52,6 +53,7 @@ fi\n\
 echo "启动 SearXNG 服务..."\n\
 echo "地址: http://0.0.0.0:8888"\n\
 echo "通用搜索API: http://0.0.0.0:8888/search"\n\
+echo "中文搜索API: http://0.0.0.0:8888/chinese_search"\n\
 echo "微信专搜API: http://0.0.0.0:8888/wechat_search"\n\
 echo "Dify集成就绪！"\n\
 \n\

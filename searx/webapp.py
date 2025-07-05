@@ -127,6 +127,67 @@ from searx.search.checker import get_result as checker_get_result
 
 logger = logger.getChild('webapp')
 
+
+def _sort_results_by_time(result_container):
+    """按时间对搜索结果进行排序（从最新到最旧）
+    
+    Args:
+        result_container: 搜索结果容器
+    """
+    import datetime
+    
+    # 获取当前时间
+    current_time = datetime.datetime.now()
+    logger.info(f"开始时间排序，当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    def get_sort_key(result):
+        """获取排序键值"""
+        # 尝试获取发布时间
+        published_date = None
+        
+        if hasattr(result, 'publishedDate') and result.publishedDate:
+            published_date = result.publishedDate
+        elif isinstance(result, dict) and result.get('publishedDate'):
+            published_date = result['publishedDate']
+        
+        # 如果有发布时间，使用发布时间；否则使用当前时间（排到最后）
+        if published_date:
+            if isinstance(published_date, str):
+                try:
+                    # 尝试解析字符串格式的时间
+                    published_date = datetime.datetime.fromisoformat(published_date.replace('Z', '+00:00'))
+                except:
+                    try:
+                        # 尝试其他常见格式
+                        published_date = datetime.datetime.strptime(published_date, '%Y-%m-%d %H:%M:%S')
+                    except:
+                        published_date = None
+            
+            if published_date:
+                # 返回负的时间戳，这样最新的时间会排在前面
+                return -published_date.timestamp()
+        
+        # 没有时间信息的结果排到最后
+        return 0
+    
+    # 对结果进行排序
+    if hasattr(result_container, 'results') and result_container.results:
+        try:
+            # 统计有时间信息的结果数量
+            results_with_time = 0
+            for result in result_container.results:
+                if hasattr(result, 'publishedDate') and result.publishedDate:
+                    results_with_time += 1
+                elif isinstance(result, dict) and result.get('publishedDate'):
+                    results_with_time += 1
+            
+            result_container.results.sort(key=get_sort_key)
+            logger.info(f"按时间排序完成: 总结果数 {len(result_container.results)}, 有时间信息的结果数 {results_with_time}")
+        except Exception as e:
+            logger.warning(f"时间排序失败: {e}")
+    
+    return result_container
+
 warnings.simplefilter("always")
 
 # about static
@@ -758,6 +819,11 @@ def wechat_search():
     
     只使用微信相关的搜索引擎进行搜索
     支持的输出格式: json
+    
+    参数:
+    - q: 搜索关键词 (必需)
+    - limit: 返回结果数量限制 (可选，默认10，最大100)
+    - sort_by_time: 是否按时间排序 (可选，默认true)
     """
     # 强制使用JSON格式
     output_format = 'json'
@@ -770,11 +836,39 @@ def wechat_search():
             'message': '请提供搜索关键词'
         }), 400
 
+    # 获取返回条数限制
+    limit = sxng_request.form.get('limit') or sxng_request.args.get('limit')
+    if limit:
+        try:
+            limit = int(limit)
+            # 限制范围在1-100之间
+            limit = max(1, min(100, limit))
+        except ValueError:
+            limit = 10
+    else:
+        limit = 10
+
+    # 获取排序参数
+    sort_by_time = sxng_request.form.get('sort_by_time') or sxng_request.args.get('sort_by_time')
+    sort_by_time = sort_by_time and sort_by_time.lower() in ['true', '1', 'yes']
+
     try:
+        # 创建一个包含查询参数的form对象
+        from werkzeug.datastructures import MultiDict
+        form_data = MultiDict()
+        form_data['q'] = query
+        form_data['format'] = 'json'
+        if limit:
+            form_data['pageno'] = '1'
+        
         # 获取搜索查询对象
         search_query, raw_text_query, _, _, selected_locale = get_search_query_from_webapp(
-            sxng_request.preferences, sxng_request.form
+            sxng_request.preferences, form_data
         )
+        
+        # 设置返回条数
+        search_query.pageno = 1
+        # 注意：results_per_page不是SearchQuery的属性，而是在各个引擎中定义的
         
         # 重写engineref_list，只包含微信相关引擎
         from searx.search.models import EngineRef
@@ -799,6 +893,10 @@ def wechat_search():
         search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
         result_container = search_obj.search()
 
+        # 按时间排序结果（从最新到最旧）- 默认启用
+        if sort_by_time is not False:  # 默认启用排序，除非明确设置为false
+            _sort_results_by_time(result_container)
+
         # 返回JSON响应
         response = webutils.get_json_response(search_query, result_container)
         return Response(response, mimetype='application/json')
@@ -811,6 +909,117 @@ def wechat_search():
         }), 400
     except Exception as e:  # pylint: disable=broad-except
         logger.exception('wechat search error', exc_info=True)
+        return jsonify({
+            'error': 'Internal search error',
+            'message': '搜索过程中发生错误'
+        }), 500
+
+
+@app.route('/chinese_search', methods=['GET', 'POST'])
+def chinese_search():
+    """专门的中文搜索API
+    
+    使用您指定的中文搜索引擎：sogou, baidu, 360search, wechat
+    支持的输出格式: json
+    
+    参数:
+    - q: 搜索关键词 (必需)
+    - limit: 返回结果数量限制 (可选，默认10，最大100)
+    - engines: 指定搜索引擎 (可选，默认使用所有中文引擎)
+    - sort_by_time: 是否按时间排序 (可选，默认true)
+    """
+    # 强制使用JSON格式
+    output_format = 'json'
+    
+    # 检查是否有查询参数
+    query = sxng_request.form.get('q') or sxng_request.args.get('q')
+    if not query:
+        return jsonify({
+            'error': 'No query provided',
+            'message': '请提供搜索关键词'
+        }), 400
+
+    # 获取返回条数限制
+    limit = sxng_request.form.get('limit') or sxng_request.args.get('limit')
+    if limit:
+        try:
+            limit = int(limit)
+            # 限制范围在1-100之间
+            limit = max(1, min(100, limit))
+        except ValueError:
+            limit = 10
+    else:
+        limit = 10
+
+    # 获取指定的搜索引擎
+    specified_engines = sxng_request.form.get('engines') or sxng_request.args.get('engines')
+    if specified_engines:
+        specified_engines = [e.strip() for e in specified_engines.split(',')]
+    else:
+        specified_engines = ['sogou', 'baidu', '360search', 'wechat']
+
+    # 获取排序参数
+    sort_by_time = sxng_request.form.get('sort_by_time') or sxng_request.args.get('sort_by_time')
+    sort_by_time = sort_by_time and sort_by_time.lower() in ['true', '1', 'yes']
+
+    try:
+        # 创建一个包含查询参数的form对象
+        from werkzeug.datastructures import MultiDict
+        form_data = MultiDict()
+        form_data['q'] = query
+        form_data['format'] = 'json'
+        if limit:
+            form_data['pageno'] = '1'
+        
+        # 获取搜索查询对象
+        search_query, raw_text_query, _, _, selected_locale = get_search_query_from_webapp(
+            sxng_request.preferences, form_data
+        )
+        
+        # 设置返回条数
+        search_query.pageno = 1
+        # 注意：results_per_page不是SearchQuery的属性，而是在各个引擎中定义的
+        
+        # 重写engineref_list，只包含您指定的中文搜索引擎
+        from searx.search.models import EngineRef
+        chinese_engines = []
+        
+        # 添加您指定的中文搜索引擎（按优先级排序）
+        for engine_name in specified_engines:
+            if engine_name in engines:
+                chinese_engines.append(EngineRef(engine_name, 'general'))
+        
+        # 如果没有可用的中文引擎，返回错误
+        if not chinese_engines:
+            return jsonify({
+                'error': 'No Chinese engines available',
+                'message': '中文搜索引擎不可用',
+                'available_engines': list(engines.keys())
+            }), 503
+        
+        # 替换搜索引擎列表
+        search_query.engineref_list = chinese_engines
+        
+        # 执行搜索
+        search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
+        result_container = search_obj.search()
+
+        # 按时间排序结果（从最新到最旧）- 默认启用
+        if sort_by_time is not False:  # 默认启用排序，除非明确设置为false
+            _sort_results_by_time(result_container)
+
+        # 返回JSON响应
+        response = webutils.get_json_response(search_query, result_container)
+        return Response(response, mimetype='application/json')
+
+    except SearxParameterException as e:
+        logger.exception('chinese search error: SearxParameterException')
+        return jsonify({
+            'error': 'Search parameter error',
+            'message': str(e.message)
+        }), 400
+    except Exception as e:  # pylint: disable=broad-except
+        logger.exception('chinese search error', exc_info=True)
         return jsonify({
             'error': 'Internal search error',
             'message': '搜索过程中发生错误'

@@ -1,109 +1,80 @@
-# 推送到GitHub指南
+# 🚀 推送到GitHub指南
 
-## 🎯 目标仓库
-https://github.com/sga-jerrylin/searxng-sga.git
+## 📋 推送步骤
 
-## 🚀 快速推送
+### 方法1：使用批处理脚本（推荐）
+```bash
+# 双击运行
+push_to_github.bat
+```
 
-### 方式1: 使用PowerShell脚本（推荐）
+### 方法2：使用PowerShell脚本
 ```powershell
 # 在PowerShell中运行
-.\update_repo.ps1
+.\push_to_github.ps1
 ```
 
-### 方式2: 使用批处理脚本
-```cmd
-# 在命令提示符中运行
-update_repo.bat
-```
-
-### 方式3: 手动Git命令
+### 方法3：手动执行命令
 ```bash
-# 1. 初始化Git仓库
-git init
+# 1. 检查状态
+git status
 
-# 2. 添加所有文件
+# 2. 添加所有更改
 git add .
 
 # 3. 提交更改
-git commit -m "feat: 重大更新 - 完整的Windows兼容性和功能增强"
+git commit -m "feat: 添加时间排序功能
 
-# 4. 设置远程仓库
-git remote add origin https://github.com/sga-jerrylin/searxng-sga.git
+- 新增自动时间排序功能（从最新到最旧）
+- 支持sort_by_time参数配置
+- 更新README文档，添加详细的时间排序说明
+- 强调Dify Docker环境必须使用host.docker.internal
+- 添加Python调用示例和Dify集成配置
+- 创建时间排序快速参考指南
+- 优化API响应格式，包含publishedDate字段"
 
-# 5. 推送到GitHub
-git branch -M main
-git push -u origin main --force
+# 4. 推送到GitHub并覆盖master分支
+git push origin master --force
 ```
 
-## 📋 更新内容总结
+## 📝 本次更新内容
 
 ### ✨ 新增功能
-- 完整的Windows兼容性支持 (pwd, uvloop, multiprocessing)
-- Dify AI平台原生集成和JSON API
-- 微信公众号专搜API (/wechat_search)
-- Docker一键部署支持
-- 多种启动方式 (简化脚本、Docker、手动)
+- **⏰ 时间排序功能**：自动按发布时间排序（最新内容优先）
+- **🔧 可配置参数**：支持 `sort_by_time` 参数
+- **📊 智能时间解析**：支持多种时间格式
+- **📈 性能优化**：轻量级实现，可配置关闭
 
-### 🔧 技术改进
-- 修复Windows下pwd模块兼容性问题
-- 修复uvloop模块在Windows下的问题  
-- 修复multiprocessing fork兼容性问题
-- 优化搜索引擎配置，禁用不稳定引擎
-- 添加连接测试和故障排除工具
+### 📚 文档更新
+- **README_CN.md**：添加详细的时间排序功能说明
+- **README.rst**：更新API端点说明和Python示例
+- **API_USAGE_GUIDE.md**：添加时间排序参数和使用示例
+- **TIME_SORTING_QUICK_REFERENCE.md**：创建快速参考指南
+- **TIME_SORTING_UPDATE.md**：创建更新总结文档
 
-### 📚 文档完善
-- Windows兼容性指南 (WINDOWS_COMPATIBILITY_GUIDE.md)
-- Docker部署指南 (DOCKER_DEPLOYMENT_GUIDE.md)
-- Dify集成指南 (DIFY_INTEGRATION_GUIDE.md)
-- 开源项目指南 (OPEN_SOURCE_GUIDE.md)
-- Git部署指南 (GIT_DEPLOYMENT_GUIDE.md)
-- 详细的API使用说明 (API_USAGE.md)
+### 🔗 Dify集成
+- **强调Docker环境配置**：必须使用 `host.docker.internal`
+- **更新工具配置**：添加时间排序参数
+- **优化响应格式**：包含 `publishedDate` 字段
 
-### 🚀 部署优化
-- 自动化启动脚本 (start_searxng_simple.py)
-- Docker编排文件 (docker-compose.yml)
-- Windows批处理脚本 (start_docker.bat)
-- 连接测试工具 (test_connection.py)
-- Git部署脚本 (git_setup.bat, git_push.bat)
+## ⚠️ 重要提醒
 
-## 🎉 推送完成后
+1. **Dify Docker环境**：必须使用 `host.docker.internal` 地址
+2. **强制推送**：使用 `--force` 参数覆盖master分支
+3. **备份建议**：推送前建议备份重要文件
 
-访问您的GitHub仓库：
-https://github.com/sga-jerrylin/searxng-sga.git
+## 🎯 推送后的验证
 
-### 建议的后续操作
-1. 检查仓库内容是否完整
-2. 更新仓库描述和标签
-3. 创建Release版本
-4. 启用Issues和Discussions
-5. 添加项目主页链接
-6. 设置分支保护规则
+推送完成后，请检查：
+1. GitHub仓库是否更新
+2. 时间排序功能是否正常工作
+3. 文档是否正确显示
+4. Dify集成配置是否正确
 
-## 🌟 项目特色
+## 📞 如有问题
 
-- ✅ 完整的Windows兼容性支持
-- ✅ Dify AI平台原生集成
-- ✅ 微信公众号专搜API
-- ✅ Docker一键部署
-- ✅ 详细的文档和使用指南
-- ✅ 专业的开源项目结构
-
-## 📱 快速启动
-
-推送完成后，用户可以通过以下方式快速启动：
-
-```bash
-# Windows环境
-python start_searxng_simple.py
-
-# Docker环境
-docker-compose up -d
-
-# 测试API
-python test_connection.py
-```
-
----
-
-🎊 **恭喜！您的SearXNG-SGA项目现在已经是一个完整的开源项目了！** 
+如果推送过程中遇到问题，请检查：
+- Git是否正确安装
+- 网络连接是否正常
+- GitHub权限是否正确
+- 远程仓库配置是否正确 

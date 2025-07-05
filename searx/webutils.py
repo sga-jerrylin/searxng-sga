@@ -157,19 +157,91 @@ class JSONEncoder(json.JSONEncoder):  # pylint: disable=missing-class-docstring
 
 
 def get_json_response(sq: SearchQuery, rc: ResultContainer) -> str:
-    """Returns the JSON string of the results to a query (``application/json``)"""
-    data = {
-        'query': sq.query,
-        'number_of_results': rc.number_of_results,
-        'results': [_.as_dict() for _ in rc.get_ordered_results()],
-        'answers': [_.as_dict() for _ in rc.answers],
-        'corrections': list(rc.corrections),
-        'infoboxes': rc.infoboxes,
-        'suggestions': list(rc.suggestions),
-        'unresponsive_engines': get_translated_errors(rc.unresponsive_engines),
-    }
-    response = json.dumps(data, cls=JSONEncoder)
-    return response
+    """Returns the JSON string of the results to a query (``application/json``)
+    
+    Enhanced version for Dify compatibility with better error handling and data validation.
+    """
+    try:
+        # 确保所有结果都是有效的字典格式
+        results = []
+        for result in rc.get_ordered_results():
+            if hasattr(result, 'as_dict'):
+                result_dict = result.as_dict()
+            else:
+                result_dict = dict(result) if isinstance(result, dict) else {}
+            
+            # 确保所有字段都是基本数据类型
+            cleaned_result = {}
+            for key, value in result_dict.items():
+                if isinstance(value, (str, int, float, bool, type(None))):
+                    cleaned_result[key] = value
+                elif isinstance(value, (list, tuple)):
+                    # 处理列表和元组
+                    cleaned_result[key] = [str(item) if not isinstance(item, (str, int, float, bool, type(None))) else item for item in value]
+                elif isinstance(value, (set, frozenset)):
+                    # 处理集合
+                    cleaned_result[key] = list(value)
+                elif hasattr(value, 'isoformat'):
+                    # 处理日期时间对象
+                    cleaned_result[key] = value.isoformat()
+                else:
+                    # 其他类型转换为字符串
+                    cleaned_result[key] = str(value)
+            
+            results.append(cleaned_result)
+        
+        # 处理answers
+        answers = []
+        for answer in rc.answers:
+            if hasattr(answer, 'as_dict'):
+                answer_dict = answer.as_dict()
+            else:
+                answer_dict = dict(answer) if isinstance(answer, dict) else {}
+            
+            # 清理answer数据
+            cleaned_answer = {}
+            for key, value in answer_dict.items():
+                if isinstance(value, (str, int, float, bool, type(None))):
+                    cleaned_answer[key] = value
+                elif hasattr(value, 'isoformat'):
+                    cleaned_answer[key] = value.isoformat()
+                else:
+                    cleaned_answer[key] = str(value)
+            
+            answers.append(cleaned_answer)
+        
+        # 构建响应数据
+        data = {
+            'query': str(sq.query) if sq.query else '',
+            'number_of_results': int(rc.number_of_results) if rc.number_of_results else 0,
+            'results': results,
+            'answers': answers,
+            'corrections': [str(correction) for correction in list(rc.corrections)],
+            'infoboxes': [dict(infobox) if isinstance(infobox, dict) else {} for infobox in rc.infoboxes],
+            'suggestions': [str(suggestion) for suggestion in list(rc.suggestions)],
+            'unresponsive_engines': get_translated_errors(rc.unresponsive_engines),
+        }
+        
+        # 使用自定义JSON编码器确保所有数据类型都正确序列化
+        response = json.dumps(data, cls=JSONEncoder, ensure_ascii=False, separators=(',', ':'))
+        return response
+        
+    except Exception as e:
+        # 如果出现错误，返回一个基本的错误响应
+        logger.exception('Error in get_json_response: %s', str(e))
+        error_data = {
+            'query': str(sq.query) if sq.query else '',
+            'number_of_results': 0,
+            'results': [],
+            'answers': [],
+            'corrections': [],
+            'infoboxes': [],
+            'suggestions': [],
+            'unresponsive_engines': [],
+            'error': 'Internal server error during JSON serialization',
+            'error_details': str(e)
+        }
+        return json.dumps(error_data, ensure_ascii=False, separators=(',', ':'))
 
 
 def get_themes(templates_path):

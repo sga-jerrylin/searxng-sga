@@ -93,6 +93,22 @@ SearXNG-SGA 在原有 SearXNG 基础上增加了以下特色功能：
    - 支持多引擎备份（主引擎 + 搜狗微信搜索）
    - 优化的中文搜索体验
 
+⏰ **Time-based Sorting**
+   - 自动按发布时间排序（最新内容优先）
+   - 支持多种时间格式解析
+   - 可配置的排序参数
+   - 智能时间解析和错误处理
+   - 详细的排序日志记录
+
+**时间排序功能特点：**
+  - 🕐 自动获取当前时间
+  - 📅 解析搜索结果中的 `publishedDate` 字段
+  - 🔄 按发布时间降序排列（最新在前）
+  - 📊 支持多种时间格式：ISO 8601、标准格式等
+  - ⚙️ 可通过 `sort_by_time=false` 关闭排序
+  - 📈 轻量级实现，不影响响应速度
+  - 🔍 智能时间解析，避免无效操作
+
 🖥️ **Windows Platform Compatibility**
    - 完整的 Windows 平台支持
    - 解决 pwd、uvloop、multiprocessing 等兼容性问题
@@ -144,12 +160,119 @@ SearXNG-SGA 在原有 SearXNG 基础上增加了以下特色功能：
    # 测试微信搜索 API
    curl "http://localhost:8888/wechat_search?q=ChatGPT"
 
+   # 测试中文搜索 API（推荐）
+   curl "http://localhost:8888/chinese_search?q=人工智能&limit=10"
+
+**5. Python 调用示例**
+
+.. code-block:: python
+
+   import requests
+
+   # 中文搜索 - 默认按时间排序
+   response = requests.get('http://localhost:8888/chinese_search', {
+       'q': '人工智能',
+       'limit': 10,
+       'engines': 'sogou,baidu'
+   })
+   data = response.json()
+
+   # 中文搜索 - 关闭时间排序
+   response = requests.get('http://localhost:8888/chinese_search', {
+       'q': '人工智能',
+       'limit': 10,
+       'engines': 'sogou,baidu',
+       'sort_by_time': False
+   })
+   data = response.json()
+
+   # 微信搜索 - 默认按时间排序
+   wechat_response = requests.get('http://localhost:8888/wechat_search', {
+       'q': 'ChatGPT',
+       'limit': 8
+   })
+   wechat_data = wechat_response.json()
+
+   # 微信搜索 - 关闭时间排序
+   wechat_response = requests.get('http://localhost:8888/wechat_search', {
+       'q': 'ChatGPT',
+       'limit': 8,
+       'sort_by_time': False
+   })
+   wechat_data = wechat_response.json()
+
 
 🔧 API Endpoints
 ================
 
-**General Search API (Dify Compatible)**
-----------------------------------------
+**Chinese Search API (Recommended)**
+-----------------------------------
+
+.. code-block:: bash
+
+   # JSON format with time sorting (default)
+   curl "http://localhost:8888/chinese_search?q=artificial%20intelligence&limit=10"
+
+   # Disable time sorting
+   curl "http://localhost:8888/chinese_search?q=artificial%20intelligence&sort_by_time=false"
+
+   # Specify engines and enable time sorting
+   curl "http://localhost:8888/chinese_search?q=artificial%20intelligence&engines=sogou,baidu&sort_by_time=true"
+
+   # Response format with time-based sorting
+   {
+     "query": "artificial intelligence",
+     "results": [
+       {
+         "title": "Latest AI News",
+         "url": "https://example.com/latest",
+         "content": "Latest artificial intelligence developments...",
+         "publishedDate": "2024-01-15T10:30:00Z",
+         "engine": "sogou"
+       },
+       {
+         "title": "AI Technology Trends",
+         "url": "https://example.com/trends",
+         "content": "Current trends in artificial intelligence...",
+         "publishedDate": "2024-01-12T14:20:00Z",
+         "engine": "baidu"
+       }
+     ],
+     "suggestions": [...],
+     "infoboxes": [...]
+   }
+
+**WeChat Specialized Search API**
+--------------------------------
+
+.. code-block:: bash
+
+   # Dedicated WeChat search with time sorting (default)
+   curl "http://localhost:8888/wechat_search?q=ChatGPT&limit=8"
+
+   # Disable time sorting for WeChat search
+   curl "http://localhost:8888/wechat_search?q=ChatGPT&sort_by_time=false"
+
+   # Get more WeChat articles with time sorting
+   curl "http://localhost:8888/wechat_search?q=ChatGPT&limit=15&sort_by_time=true"
+
+   # Specialized response for WeChat articles
+   {
+     "query": "ChatGPT",
+     "wechat_results": [
+       {
+         "title": "WeChat Article Title",
+         "content": "Article summary...",
+         "url": "https://wechat.com/article",
+         "publishedDate": "2024-01-12T14:20:00Z",
+         "engine": "wechat"
+       }
+     ],
+     "total_results": 10
+   }
+
+**General Search API (Legacy)**
+-------------------------------
 
 .. code-block:: bash
 
@@ -164,20 +287,22 @@ SearXNG-SGA 在原有 SearXNG 基础上增加了以下特色功能：
      "infoboxes": [...]
    }
 
-**WeChat Specialized Search API**
---------------------------------
+**Time-based Sorting Features:**
+  - ✅ Automatic sorting by publication date (newest first)
+  - ✅ Support for multiple time formats (ISO 8601, standard format)
+  - ✅ Configurable sorting parameter (`sort_by_time`)
+  - ✅ Fallback for results without time information
+  - ✅ Enhanced logging and error handling
 
-.. code-block:: bash
+**Time Sorting Parameters:**
+  - ``sort_by_time=true`` (default): Enable time-based sorting
+  - ``sort_by_time=false``: Disable time sorting (use relevance sorting)
+  - Supported values: ``true``, ``1``, ``yes`` or ``false``, ``0``, ``no``
 
-   # Dedicated WeChat search (JSON only)
-   curl "http://localhost:8888/wechat_search?q=ChatGPT"
-
-   # Specialized response for WeChat articles
-   {
-     "query": "ChatGPT",
-     "wechat_results": [...],
-     "total_results": 10
-   }
+**Supported Time Formats:**
+  - ISO 8601: ``2024-01-15T10:30:00Z``
+  - Standard format: ``2024-01-15 10:30:00``
+  - Automatic parsing of multiple formats
 
 **Supported Output Formats:**
   - ``html`` (默认网页界面)
@@ -187,6 +312,48 @@ SearXNG-SGA 在原有 SearXNG 基础上增加了以下特色功能：
   - 主微信搜索引擎
   - 搜狗微信搜索（备用）
 
+
+⏰ Time-based Sorting Feature
+=============================
+
+**Overview**
+SearXNG-SGA includes a powerful time-based sorting feature that automatically sorts search results by publication date, ensuring users always get the latest information.
+
+**Technical Implementation**
+- **Automatic Time Detection**: System automatically gets current time as reference
+- **Smart Time Parsing**: Supports automatic parsing of multiple time formats
+- **Descending Sort**: Results sorted by publication date (newest first)
+- **Error Handling**: Results without time information are placed at the end
+- **Performance Optimization**: Lightweight implementation with minimal impact
+
+**Supported Time Formats**
+- **ISO 8601 Format**: ``2024-01-15T10:30:00Z``
+- **Standard Format**: ``2024-01-15 10:30:00``
+- **Auto Parsing**: System automatically tries multiple time formats
+
+**Parameter Configuration**
+- **``sort_by_time=true``** (default): Enable time-based sorting
+- **``sort_by_time=false``**: Disable time sorting, use relevance sorting
+- **Supported Values**: ``true``, ``1``, ``yes`` or ``false``, ``0``, ``no``
+
+**Performance Characteristics**
+- ✅ Lightweight sorting algorithm with minimal impact
+- ✅ Smart time parsing to avoid invalid operations
+- ✅ Can be disabled via parameter to improve performance
+- ✅ Detailed performance logging
+
+**Use Cases**
+1. **News Search**: Get latest news and information
+2. **Technical Documentation**: Get latest technical docs and tutorials
+3. **WeChat Articles**: Get latest WeChat public account articles
+4. **Academic Papers**: Get latest research results
+
+**Logging Information**
+The system logs the following information:
+- Current time
+- Sorting start and completion status
+- Number of results with time information
+- Errors and warnings during sorting process
 
 🖥️ Windows Compatibility
 =========================
@@ -238,25 +405,52 @@ SearXNG-SGA 完全兼容 Windows 平台，解决了以下兼容性问题：
 🤖 Dify Integration
 ===================
 
-SearXNG-SGA 提供完整的 Dify AI 平台集成支持：
+**⚠️ 重要提醒：Dify 平台内置的 SearXNG 插件与本项目 API 不兼容！**
 
-**API 配置示例:**
+请使用 Dify 工作流中的 **HTTP 请求节点** 调用我们的专用 API。
 
-.. code-block:: yaml
+**🚨 关键配置要求：**
+在 Dify Docker 环境中，必须使用 `host.docker.internal` 地址！
 
-   # Dify 应用配置
-   api_endpoint: "http://localhost:8888/search"
-   format: "json"
-   timeout: 30
+- ❌ 错误：`http://localhost:8888/chinese_search`
+- ✅ 正确：`http://host.docker.internal:8888/chinese_search`
 
-**集成特性:**
-  - 原生 JSON 响应格式
-  - 优化的超时设置
-  - 错误处理机制
-  - 多语言支持
+这是因为 Dify 运行在 Docker 容器内，无法直接访问宿主机的 localhost。
 
-📖 详细指南请参考：`DIFY_INTEGRATION_GUIDE.md`_
+**推荐集成方案：**
 
+1. **中文搜索工具（推荐）**
+   - API 端点：`/chinese_search`
+   - 特点：锁定优质中文搜索引擎，自动时间排序
+   - 支持引擎：sogou, baidu, 360search, wechat
+
+2. **微信专搜工具**
+   - API 端点：`/wechat_search`
+   - 特点：专门搜索微信公众号内容，自动时间排序
+
+**Dify 工作流配置示例：**
+
+.. code-block:: json
+
+   {
+     "name": "chinese_search",
+     "description": "中文搜索工具，使用优质中文搜索引擎，自动按时间排序",
+     "method": "GET",
+     "url": "http://host.docker.internal:8888/chinese_search",
+     "parameters": {
+       "q": "{{query}}",
+       "limit": "{{limit|default:10}}",
+       "engines": "{{engines|default:sogou,baidu,360search,wechat}}",
+       "sort_by_time": "{{sort_by_time|default:true}}"
+     },
+     "headers": {
+       "Content-Type": "application/json"
+     }
+   }
+
+**详细集成指南：**
+  - `📖 Dify 集成指南 <DIFY_WORKFLOW_GUIDE.md>`_
+  - `📱 API 使用说明 <API_USAGE_GUIDE.md>`_
 
 📱 WeChat Search API
 ====================
