@@ -1,19 +1,21 @@
-# SearXNG - 增强版隐私搜索引擎
+# SearXNG-SGA - 面向中国企业的私有化搜索引擎
 
 ## 🎯 项目概述
 
-这是一个增强版的SearXNG隐私搜索引擎，专门针对AI应用开发和中文搜索场景进行了优化。
+这是一个基于 SearXNG 深度优化的企业级搜索引擎，聚焦中文搜索、公众号专搜与平台集成，默认时间优先展示，结果更相关、更干净。
 
-### ✨ 新增功能
+### ✨ 核心特性（v1.1.0）
 
-- **🤖 Dify集成支持** - 原生JSON API，完美适配Dify AI开发平台
-- **📱 微信专搜API** - 专门的微信公众号搜索接口
-- **🔧 优化配置** - 针对中文用户优化的搜索引擎配置
-- **⏰ 时间排序功能** - 自动按发布时间排序（最新内容优先）
+- **📱 微信专搜API** - 专门的公众号搜索端点
+- **⏱ 时间优先** - 网页端默认按时间排序（最新优先）
+- **🔎 相关性重排** - 文本模板组内相关性重排（网页端）；API 轻量重排（可开启 `debug_score`）
+- **🧹 结果清洁** - 列表级去重（URL 指纹 + 标题近似）、低相关过滤、标题/摘要清洗
+- **🧰 稳定性** - 微信相关 UA 轮换、指数退避重试、可选代理（`WECHAT_PROXY`）
+- **⚡ 缓存** - API 结果 60s 短期缓存（512 条）
 
 ## 🚀 快速开始
 
-### 1. 启动服务
+### 1. 启动服务（Docker）
 
 #### 标准启动方式
 ```bash
@@ -44,13 +46,8 @@ curl "http://localhost:8888/wechat_search?q=ChatGPT&limit=8"
 curl "http://localhost:8888/search?q=人工智能&format=json"
 ```
 
-### 🪟 Windows兼容性
-本项目已针对Windows环境进行全面优化，解决了以下兼容性问题：
-- ✅ **pwd模块兼容性** - Unix专用模块在Windows下的替代方案
-- ✅ **uvloop模块兼容性** - 异步事件循环在Windows下的优化
-- ✅ **multiprocessing fork兼容性** - 多进程上下文在Windows下的适配
-
-详细信息请参考 [Windows兼容性指南](WINDOWS_COMPATIBILITY_GUIDE.md)
+### 🪟 环境兼容性
+支持 Windows / Linux / macOS 下 Docker 运行。
 
 ## 📡 API接口说明
 
@@ -226,11 +223,9 @@ search:
 - name: sogou wechat     # 搜狗微信搜索（备用）
 ```
 
-### 已禁用的搜索引擎
-为了提升性能，以下搜索引擎已被禁用：
-- quark、seznam、wolframalpha
-- crowdview、mojeek、mwmbl
-- naver、bing系列、bpb
+### 运行建议
+- 需要更强的新鲜度时，可调高过滤阈值或限定日期
+- 若命中反爬，可配置 `WECHAT_PROXY` 并适度放宽 `limit`
 
 ## 💻 使用示例
 
@@ -526,8 +521,7 @@ python -m searx.webapp
 ```
 
 ## 📞 技术支持
-
-详细的API文档和使用说明请参考：`API_USAGE.md`
+如需企业级定制与支持，请在 Issue 中联系。
 
 ## 🌟 开源项目
 
@@ -548,12 +542,11 @@ git_push.bat
 git_setup.bat
 ```
 
-### 主要特性
-- ✅ **完整的Windows兼容性支持**
-- ✅ **Dify AI平台原生集成**
-- ✅ **微信公众号专搜API**
-- ✅ **Docker一键部署**
-- ✅ **详细的文档和示例**
+### 本版本要点（v1.1.0）
+- Web：时间优先排序、组内相关性重排（文本）、列表级去重、低相关过滤、标题/摘要清洗
+- API：轻量相关性重排（`debug_score` 可透出）、60s 缓存、去重清洗
+- 稳定性：微信 UA 轮换、退避重试、可选代理
+- 精简：移除无关脚本文档，Docker/compose 精简
 
 ## 📄 许可证
 
