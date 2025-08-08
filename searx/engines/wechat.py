@@ -5,6 +5,8 @@ from urllib.parse import (
 from lxml import html
 import random
 import re
+import os
+import time
 from searx.utils import (
     eval_xpath_getindex,
     eval_xpath_list,
@@ -37,6 +39,32 @@ def request(query, params):
     )
     params['url'] = base_url + '?' + args
 
+    # UA 池与请求头（降低反爬拦截）
+    UA_POOL = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+    ]
+    ua = random.choice(UA_POOL)
+    params['headers'] = {
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Referer': 'https://weixin.sogou.com/',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Upgrade-Insecure-Requests': '1',
+        'Connection': 'keep-alive',
+    }
+
+    # 可选代理（环境变量 WECHAT_PROXY，格式 http://host:port）
+    proxy = os.environ.get('WECHAT_PROXY')
+    if proxy:
+        params['proxies'] = {
+            'http': proxy,
+            'https': proxy,
+        }
+
 
 def parse_url(url_string):
     try:
@@ -65,11 +93,18 @@ def parse_url2(url_string):
                   'IPLOC=CN1100; ariaDefaultTheme=undefined',
     }
     try:
-        resp = get(url_string, headers=headers)
-        parsed_url_list = re.findall(r"url \\+= '(.+)'", resp.text)
-        parsed_url = ''.join(parsed_url_list)
-        parsed_url = re.sub(r'@', r'', parsed_url)
-        return parsed_url
+        # 带重试和退避
+        backoff = 0.5
+        for _ in range(3):
+            resp = get(url_string, headers=headers)
+            parsed_url_list = re.findall(r"url \\+= '(.+)'", resp.text)
+            parsed_url = ''.join(parsed_url_list)
+            parsed_url = re.sub(r'@', r'', parsed_url)
+            if parsed_url:
+                return parsed_url
+            time.sleep(backoff)
+            backoff *= 2
+        return url_string
     except Exception:
         # 如果获取失败，返回原始 URL
         return url_string

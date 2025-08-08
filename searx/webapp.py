@@ -13,6 +13,9 @@ import sys
 import base64
 
 from timeit import default_timer
+import re
+import threading
+import time
 from html import escape
 from io import StringIO
 import typing
@@ -187,6 +190,496 @@ def _sort_results_by_time(result_container):
             logger.warning(f"时间排序失败: {e}")
     
     return result_container
+
+
+def _get_field(result, field_name: str):
+    try:
+        if isinstance(result, dict):
+            return result.get(field_name)
+        return getattr(result, field_name, None)
+    except Exception:
+        return None
+
+
+def _compute_simple_relevance_score(query_text: str, title: str, content: str) -> float:
+    if not query_text:
+        return 0.0
+    q = str(query_text).strip().lower()
+    if not q:
+        return 0.0
+    t = (title or "").lower()
+    c = (content or "").lower()
+
+    score = 0.0
+    # 标题强匹配权重较高
+    if q in t:
+        score += 1.0
+        # 标题前缀/整词强化（简单启发）
+        if t.startswith(q):
+            score += 0.3
+    # 摘要匹配
+    if q in c:
+        score += 0.4
+
+    # 覆盖率（非常轻量，避免过重开销）
+    # 使用分词开销较大，这里采用按空白切分的近似（对中文退化为子串匹配已上面覆盖）
+    tokens = [tok for tok in q.split() if tok]
+    if tokens:
+        covered = sum(1 for tok in tokens if tok in t or tok in c)
+        score += 0.1 * (covered / max(1, len(tokens)))
+    return score
+
+
+def _re_rank_results(query_text: str, result_container, keep_time_bias: bool = True, include_score: bool = False):
+    # 为每条结果附加 relevance 分数，并与时间分数做简易融合
+    # 时间分数：若存在发布时间，则给一个小幅加成，保持“越新越好”的微弱偏好
+    ranked = []
+    for item in getattr(result_container, 'results', []) or []:
+        title = _get_field(item, 'title')
+        content = _get_field(item, 'content')
+        rel = _compute_simple_relevance_score(query_text, title or '', content or '')
+
+        time_bonus = 0.0
+        if keep_time_bias:
+            published_date = _get_field(item, 'publishedDate')
+            if published_date:
+                try:
+                    import datetime
+                    if isinstance(published_date, str):
+                        try:
+                            published_date_dt = datetime.datetime.fromisoformat(published_date.replace('Z', '+00:00'))
+                        except Exception:
+                            published_date_dt = datetime.datetime.strptime(published_date, '%Y-%m-%d %H:%M:%S')
+                    else:
+                        published_date_dt = published_date
+                    # 最近 7 天内的结果给额外加成，线性衰减
+                    delta_days = (datetime.datetime.now(datetime.timezone.utc) - published_date_dt.replace(tzinfo=datetime.timezone.utc)).days if published_date_dt.tzinfo else (datetime.datetime.now() - published_date_dt).days
+                    if delta_days <= 7:
+                        time_bonus = max(0.0, 0.3 * (1 - delta_days / 7.0))
+                except Exception:
+                    time_bonus = 0.0
+
+        total_score = rel + time_bonus
+        if include_score:
+            try:
+                if isinstance(item, dict):
+                    item['score'] = round(total_score, 4)
+            except Exception:
+                pass
+        ranked.append((total_score, item))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    if ranked:
+        result_container.results = [it for _, it in ranked]
+    return result_container
+
+
+def _sort_results_list_by_time(items):
+    import datetime
+    def parse_dt(val):
+        if not val:
+            return None
+        if isinstance(val, str):
+            try:
+                return datetime.datetime.fromisoformat(val.replace('Z', '+00:00'))
+            except Exception:
+                try:
+                    return datetime.datetime.strptime(val, '%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    return None
+        return val
+    def key_func(it):
+        dt = _get_field(it, 'publishedDate')
+        dt = parse_dt(dt)
+        if not dt:
+            return 0
+        try:
+            return dt.timestamp()
+        except Exception:
+            return 0
+    try:
+        items.sort(key=key_func, reverse=True)
+    except Exception:
+        pass
+    return items
+
+
+def _is_textual_template(template_name: str) -> bool:
+    if not template_name:
+        return True
+    name = template_name.lower()
+    excluded = ['image', 'images', 'video', 'videos', 'map', 'torrent', 'file', 'files', 'music', 'audio']
+    return not any(x in name for x in excluded)
+
+
+def _re_rank_results_for_web(query_text: str, result_container, keep_time_bias: bool = True, include_score: bool = False):
+    # 仅在同一模板组内重排，避免打散前端不同结果模板的分组
+    items = getattr(result_container, 'results', []) or []
+    if not items:
+        return result_container
+    # 分组：template -> indices
+    groups = {}
+    for idx, item in enumerate(items):
+        tpl = getattr(item, 'template', '') or ''
+        groups.setdefault(tpl, []).append(idx)
+
+    for tpl, indices in groups.items():
+        if not _is_textual_template(tpl):
+            continue
+        # 组内计算分数并排序
+        scored = []
+        for i in indices:
+            it = items[i]
+            title = _get_field(it, 'title') or ''
+            content = _get_field(it, 'content') or ''
+            rel = _compute_simple_relevance_score(query_text, title, content)
+            time_bonus = 0.0
+            if keep_time_bias:
+                published_date = _get_field(it, 'publishedDate')
+                if published_date:
+                    try:
+                        import datetime
+                        if isinstance(published_date, str):
+                            try:
+                                dt = datetime.datetime.fromisoformat(published_date.replace('Z', '+00:00'))
+                            except Exception:
+                                dt = datetime.datetime.strptime(published_date, '%Y-%m-%d %H:%M:%S')
+                        else:
+                            dt = published_date
+                        delta_days = (datetime.datetime.now(datetime.timezone.utc) - dt.replace(tzinfo=datetime.timezone.utc)).days if dt.tzinfo else (datetime.datetime.now() - dt).days
+                        if delta_days <= 7:
+                            time_bonus = max(0.0, 0.3 * (1 - delta_days / 7.0))
+                    except Exception:
+                        pass
+            total = rel + time_bonus
+            if include_score and isinstance(it, dict):
+                try:
+                    it['score'] = round(total, 4)
+                except Exception:
+                    pass
+            scored.append((total, i))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        # 组内重排
+        ordered_indices = [i for _, i in scored]
+        # 将此模板组的 items 重新按分数顺序放回
+        items_slice = [items[i] for i in ordered_indices]
+        for j, idx in enumerate(indices):
+            items[idx] = items_slice[j]
+    result_container.results = items
+    return result_container
+
+
+def _re_rank_results_for_web_list(query_text: str, items: list, keep_time_bias: bool = True):
+    if not items:
+        return items
+    groups = {}
+    for idx, item in enumerate(items):
+        tpl = getattr(item, 'template', '') or ''
+        groups.setdefault(tpl, []).append(idx)
+
+    for tpl, indices in groups.items():
+        if not _is_textual_template(tpl):
+            continue
+        scored = []
+        for i in indices:
+            it = items[i]
+            title = _get_field(it, 'title') or ''
+            content = _get_field(it, 'content') or ''
+            rel = _compute_simple_relevance_score(query_text, title, content)
+            time_bonus = 0.0
+            if keep_time_bias:
+                published_date = _get_field(it, 'publishedDate')
+                if published_date:
+                    try:
+                        import datetime
+                        if isinstance(published_date, str):
+                            try:
+                                dt = datetime.datetime.fromisoformat(published_date.replace('Z', '+00:00'))
+                            except Exception:
+                                dt = datetime.datetime.strptime(published_date, '%Y-%m-%d %H:%M:%S')
+                        else:
+                            dt = published_date
+                        delta_days = (datetime.datetime.now(datetime.timezone.utc) - dt.replace(tzinfo=datetime.timezone.utc)).days if dt.tzinfo else (datetime.datetime.now() - dt).days
+                        if delta_days <= 7:
+                            time_bonus = max(0.0, 0.3 * (1 - delta_days / 7.0))
+                    except Exception:
+                        pass
+            scored.append((rel + time_bonus, i))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        ordered_indices = [i for _, i in scored]
+        group_items = [items[i] for i in ordered_indices]
+        for j, idx in enumerate(indices):
+            items[idx] = group_items[j]
+    return items
+
+
+def _calc_item_relevance(query_text: str, item) -> float:
+    title = _get_field(item, 'title') or ''
+    content = _get_field(item, 'content') or ''
+    rel = _compute_simple_relevance_score(query_text, title, content)
+    time_bonus = 0.0
+    published_date = _get_field(item, 'publishedDate')
+    if published_date:
+        try:
+            import datetime
+            if isinstance(published_date, str):
+                try:
+                    dt = datetime.datetime.fromisoformat(published_date.replace('Z', '+00:00'))
+                except Exception:
+                    dt = datetime.datetime.strptime(published_date, '%Y-%m-%d %H:%M:%S')
+            else:
+                dt = published_date
+            delta_days = (datetime.datetime.now(datetime.timezone.utc) - dt.replace(tzinfo=datetime.timezone.utc)).days if dt.tzinfo else (datetime.datetime.now() - dt).days
+            if delta_days <= 7:
+                time_bonus = max(0.0, 0.3 * (1 - delta_days / 7.0))
+        except Exception:
+            pass
+    return rel + time_bonus
+
+
+def _filter_low_relevance_for_web(query_text: str, items: list, min_score: float) -> list:
+    if not items:
+        return items
+    # 从查询中提取必须命中的关键片段
+    alnum_tokens = re.findall(r"[A-Za-z0-9]{2,}", query_text or "")
+    cjk_tokens = re.findall(r"[\u4e00-\u9fff]{2,}", query_text or "")
+    must_tokens = set([t.lower() for t in alnum_tokens + cjk_tokens])
+    AGG_HOSTS = {
+        'baidu.com', 'www.baidu.com', 'm.baidu.com',
+        'weixin.sogou.com', 'sogou.com', 'www.sogou.com',
+        '360kuai.com', 'www.360kuai.com', 'so.com', 'www.so.com',
+        '360doc.com', 'www.360doc.com',
+    }
+
+    filtered = []
+    for it in items:
+        tpl = getattr(it, 'template', '') or ''
+        if _is_textual_template(tpl):
+            score = _calc_item_relevance(query_text, it)
+            title = (_get_field(it, 'title') or '').lower()
+            content = (_get_field(it, 'content') or '').lower()
+            text_blob = title + ' ' + content
+            must_ok = True
+            if must_tokens:
+                must_ok = any(tok in text_blob for tok in must_tokens)
+            host = ''
+            try:
+                u = _normalize_url_for_fingerprint(_get_field(it, 'url') or '')
+                host = urllib.parse.urlparse(u).netloc.lower()
+            except Exception:
+                host = ''
+            is_agg = host in AGG_HOSTS
+            # 聚合/跳转站点更严格
+            if (score >= min_score and must_ok) or (not is_agg and score >= (min_score - 0.15) and must_ok):
+                filtered.append(it)
+        else:
+            filtered.append(it)
+    return filtered
+
+
+# -------------------------
+# 结果去重 / 规范化 / 清洗
+# -------------------------
+_TRACKING_PARAMS = {
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+    'spm', 'from', 'source', 'referer', 'ref', 'ncid', 'mkt', 'cid'
+}
+
+
+def _normalize_url_for_fingerprint(url: str) -> str:
+    try:
+        if not url:
+            return ''
+        parsed = urllib.parse.urlparse(url)
+        scheme = (parsed.scheme or 'http').lower()
+        netloc = (parsed.netloc or '').lower()
+        path = parsed.path or '/'
+        # 过滤常见追踪参数，并排序
+        query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=False)
+        filtered = [(k, v) for (k, v) in query_pairs if k not in _TRACKING_PARAMS]
+        filtered.sort()
+        query = urllib.parse.urlencode(filtered)
+        return urllib.parse.urlunparse((scheme, netloc, path, '', query, ''))
+    except Exception:
+        return url or ''
+
+
+def _clean_text_noise(text: typing.Optional[str]) -> str:
+    if not text:
+        return ''
+    try:
+        # 去零宽字符/多空白/首尾空白
+        t = str(text)
+        t = t.replace('\u200b', '').replace('\ufeff', '')
+        t = re.sub(r'[\s\u00A0\u3000]+', ' ', t)
+        t = t.strip()
+        # 去常见噪声标记
+        t = re.sub(r'[\[\]（）()【】<>「」『』]+', ' ', t)
+        t = re.sub(r'\s{2,}', ' ', t)
+        return t
+    except Exception:
+        return str(text)
+
+
+def _dedupe_and_clean_results(result_container):
+    seen = set()
+    deduped = []
+    for item in getattr(result_container, 'results', []) or []:
+        try:
+            if isinstance(item, dict):
+                url_val = item.get('url')
+                title_val = item.get('title')
+            else:
+                url_val = getattr(item, 'url', None)
+                title_val = getattr(item, 'title', None)
+
+            fp_url = _normalize_url_for_fingerprint(url_val or '')
+            fp_title = (_clean_text_noise(title_val or '')).lower()
+            fingerprint = fp_url or fp_title
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+
+            # 清洗文本字段
+            cleaned_title = _clean_text_noise(title_val)
+            content_val = item.get('content') if isinstance(item, dict) else getattr(item, 'content', '')
+            cleaned_content = _clean_text_noise(content_val)
+            if isinstance(item, dict):
+                item['title'] = cleaned_title
+                item['content'] = cleaned_content
+                item['url'] = fp_url or (url_val or '')
+            else:
+                try:
+                    setattr(item, 'title', cleaned_title)
+                    setattr(item, 'content', cleaned_content)
+                    setattr(item, 'url', fp_url or (url_val or ''))
+                except Exception:
+                    pass
+
+            deduped.append(item)
+        except Exception:
+            deduped.append(item)
+
+    if deduped:
+        result_container.results = deduped
+    return result_container
+
+
+# -------------------------
+# 简易内存缓存（TTL + 容量限制）
+# -------------------------
+_API_CACHE: dict[str, tuple[float, str]] = {}
+_API_CACHE_LOCK = threading.Lock()
+_API_CACHE_TTL_SEC = 60.0
+_API_CACHE_MAX_ENTRIES = 512
+
+
+def _cache_get(cache_key: str) -> typing.Optional[str]:
+    now = time.time()
+    with _API_CACHE_LOCK:
+        hit = _API_CACHE.get(cache_key)
+        if not hit:
+            return None
+        ts, val = hit
+        if now - ts > _API_CACHE_TTL_SEC:
+            _API_CACHE.pop(cache_key, None)
+            return None
+        return val
+
+
+def _cache_set(cache_key: str, value: str) -> None:
+    now = time.time()
+    with _API_CACHE_LOCK:
+        if len(_API_CACHE) >= _API_CACHE_MAX_ENTRIES:
+            # 简单清理：删除最早插入的 10%（无序 dict 近似，足够简单）
+            to_remove = int(max(1, _API_CACHE_MAX_ENTRIES * 0.1))
+            for k in list(_API_CACHE.keys())[:to_remove]:
+                _API_CACHE.pop(k, None)
+        _API_CACHE[cache_key] = (now, value)
+
+
+def _dedupe_list_for_web(results_list):
+    """网页端列表级去重：
+    - 规则1：规范化 URL 指纹完全相同 => 去重
+    - 规则2：标题近似（相似度>=0.92 或包含关系）也视为重复；在这种情况下优先保留“更优主域”的结果
+    """
+    import difflib
+    HOST_PRIORITY = {
+        # 优先保留（数值越小越优先）
+        'mp.weixin.qq.com': 0,
+        '36kr.com': 1,
+        'www.huxiu.com': 1,
+        'www.cnbeta.com': 2,
+        # 明显聚合/跳转域名（尽量丢弃）
+        'weixin.sogou.com': 9,
+        'www.sogou.com': 9,
+        'sogou.com': 9,
+        '360kuai.com': 9,
+        'www.360kuai.com': 9,
+        'baidu.com': 9,
+        'www.baidu.com': 9,
+    }
+
+    def host_priority(url: str) -> int:
+        try:
+            host = urllib.parse.urlparse(url or '').netloc.lower()
+            # 去掉常见 www 前缀统一判定
+            if host.startswith('www.'):
+                host_key = host
+            else:
+                host_key = host
+            return HOST_PRIORITY.get(host_key, 5)
+        except Exception:
+            return 5
+
+    kept = []
+    fingerprints = []  # 与 kept 对齐，存(规范化URL, 规范化标题)
+    for item in results_list or []:
+        try:
+            url_val = getattr(item, 'url', None) or (item.get('url') if isinstance(item, dict) else None)
+            title_val = getattr(item, 'title', None) or (item.get('title') if isinstance(item, dict) else None)
+
+            norm_url = _normalize_url_for_fingerprint(url_val or '')
+            norm_title = (_clean_text_noise(title_val or '')).lower()
+
+            # 规则1：URL 指纹完全一样 => 重复
+            is_duplicate = False
+            duplicate_index = -1
+            for idx, (k_url, k_title) in enumerate(fingerprints):
+                if norm_url and k_url and norm_url == k_url:
+                    is_duplicate = True
+                    duplicate_index = idx
+                    break
+            if not is_duplicate and norm_title:
+                # 规则2：标题近似
+                for idx, (k_url, k_title) in enumerate(fingerprints):
+                    if not k_title:
+                        continue
+                    ratio = difflib.SequenceMatcher(None, norm_title, k_title).ratio()
+                    if ratio >= 0.92 or norm_title in k_title or k_title in norm_title:
+                        is_duplicate = True
+                        duplicate_index = idx
+                        break
+
+            if not is_duplicate:
+                kept.append(item)
+                fingerprints.append((norm_url, norm_title))
+            else:
+                # 发生冲突：按主域优先级选择保留谁
+                try:
+                    current_priority = host_priority(norm_url or url_val or '')
+                    exist_item = kept[duplicate_index]
+                    exist_url = getattr(exist_item, 'url', None) or (exist_item.get('url') if isinstance(exist_item, dict) else None)
+                    exist_priority = host_priority(_normalize_url_for_fingerprint(exist_url or '') or exist_url or '')
+                    if current_priority < exist_priority:
+                        kept[duplicate_index] = item
+                        fingerprints[duplicate_index] = (norm_url, norm_title)
+                except Exception:
+                    pass
+        except Exception:
+            kept.append(item)
+            fingerprints.append(('', ''))
+    return kept
 
 warnings.simplefilter("always")
 
@@ -722,9 +1215,31 @@ def search():
     previous_result = None
 
     results = result_container.get_ordered_results()
+    # 列表级去重（标题/URL）+ 过滤低相关 + 时间优先排序 + 组内相关性（文本模板）
+    results = _dedupe_list_for_web(results)
+    results = _filter_low_relevance_for_web(search_query.query, results, min_score=0.8)
+    results = _sort_results_list_by_time(results)
+    results = _re_rank_results_for_web_list(search_query.query, results, keep_time_bias=True)
+    # 网页端：清洗文本噪声，提升可读性
+    for result in results:
+        if output_format == 'html':
+            if 'content' in result and result['content']:
+                result['content'] = _clean_text_noise(result['content'])
+                result['content'] = highlight_content(escape(result['content'][:1024]), search_query.query)
+            if 'title' in result and result['title']:
+                result['title'] = _clean_text_noise(result['title'])
+                result['title'] = highlight_content(escape(result['title'] or ''), search_query.query)
 
     if search_query.redirect_to_first_result and results:
         return redirect(results[0]['url'], 302)
+
+    # 在分组标记之前：对组内进行相关性重排（仅文本模板），避免跨模板分组被打散
+    _re_rank_results_for_web(search_query.query, result_container, keep_time_bias=True, include_score=False)
+    results = result_container.get_ordered_results()
+    results = _dedupe_list_for_web(results)
+    results = _filter_low_relevance_for_web(search_query.query, results, min_score=0.8)
+    results = _sort_results_list_by_time(results)
+    results = _re_rank_results_for_web_list(search_query.query, results, keep_time_bias=True)
 
     for result in results:
         if output_format == 'html':
@@ -889,16 +1404,26 @@ def wechat_search():
         # 替换搜索引擎列表
         search_query.engineref_list = wechat_engines
         
+        # 缓存键
+        cache_key = f"wechat::{query}::p1::limit={limit}::debug={debug_score}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return Response(cached, mimetype='application/json')
+
         # 执行搜索
         search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
         result_container = search_obj.search()
 
-        # 按时间排序结果（从最新到最旧）- 默认启用
-        if sort_by_time is not False:  # 默认启用排序，除非明确设置为false
-            _sort_results_by_time(result_container)
+        # 去重与清洗
+        _dedupe_and_clean_results(result_container)
+        # 相关性重排（轻量级）+ 时间微偏好 + 可选透出分数（API默认仍保留新鲜度）
+        debug_score = sxng_request.form.get('debug_score') or sxng_request.args.get('debug_score')
+        debug_score = bool(debug_score and str(debug_score).lower() in ['true', '1', 'yes'])
+        _re_rank_results(query, result_container, keep_time_bias=True, include_score=debug_score)
 
         # 返回JSON响应
         response = webutils.get_json_response(search_query, result_container)
+        _cache_set(cache_key, response)
         return Response(response, mimetype='application/json')
 
     except SearxParameterException as e:
@@ -1000,16 +1525,26 @@ def chinese_search():
         # 替换搜索引擎列表
         search_query.engineref_list = chinese_engines
         
+        # 缓存键（包含引擎列表）
+        cache_key = f"chinese::{query}::p1::{'-'.join(specified_engines)}::limit={limit}::debug={debug_score}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return Response(cached, mimetype='application/json')
+
         # 执行搜索
         search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
         result_container = search_obj.search()
 
-        # 按时间排序结果（从最新到最旧）- 默认启用
-        if sort_by_time is not False:  # 默认启用排序，除非明确设置为false
-            _sort_results_by_time(result_container)
+        # 去重与清洗
+        _dedupe_and_clean_results(result_container)
+        # 相关性重排（轻量级）+ 时间微偏好 + 可选透出分数（API默认仍保留新鲜度）
+        debug_score = sxng_request.form.get('debug_score') or sxng_request.args.get('debug_score')
+        debug_score = bool(debug_score and str(debug_score).lower() in ['true', '1', 'yes'])
+        _re_rank_results(query, result_container, keep_time_bias=True, include_score=debug_score)
 
         # 返回JSON响应
         response = webutils.get_json_response(search_query, result_container)
+        _cache_set(cache_key, response)
         return Response(response, mimetype='application/json')
 
     except SearxParameterException as e:

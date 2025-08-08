@@ -2,6 +2,7 @@
 """Sogou-WeChat search engine for retrieving WeChat Article from Sogou"""
 
 from urllib.parse import urlencode
+import random
 from datetime import datetime
 import re
 from lxml import html
@@ -33,6 +34,23 @@ def request(query, params):
     }
 
     params["url"] = f"{base_url}/weixin?{urlencode(query_params)}"
+    # 设置请求头，贴近真实浏览器，提升成功率（UA 轮换）
+    UA_POOL = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+    ]
+    ua = random.choice(UA_POOL)
+    params["headers"] = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://weixin.sogou.com/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+    }
     return params
 
 

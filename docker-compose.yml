@@ -26,7 +26,7 @@ services:
     build: 
       context: .
       dockerfile: Dockerfile
-    container_name: searxng-dify
+    container_name: searxng
     ports:
       - "8888:8888"
     volumes:
@@ -43,7 +43,6 @@ services:
     restart: unless-stopped
     networks:
       - searxng-net
-      - dify-network  # 用于连接Dify
     cap_drop:
       - ALL
     cap_add:
@@ -63,5 +62,3 @@ volumes:
 networks:
   searxng-net:
     driver: bridge
-  dify-network:
-    external: true  # 外部网络，需要预先创建 
