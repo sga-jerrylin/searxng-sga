@@ -38,8 +38,10 @@ services:
       - SEARXNG_PORT=8888
       - SEARXNG_REDIS_URL=redis://redis:6379/0
       - PYTHONPATH=/usr/local/searxng
+      - ES_URL=http://es:9200
     depends_on:
       - redis
+      - es
     restart: unless-stopped
     networks:
       - searxng-net
@@ -55,10 +57,27 @@ services:
         max-size: "1m"
         max-file: "1"
 
+  es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    networks:
+      - searxng-net
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+
 volumes:
   redis-data:
   searxng-logs:
+  esdata:
 
 networks:
   searxng-net:
     driver: bridge
+
+  # Elasticsearch 单节点，用于 BM25 + 时间衰减重排

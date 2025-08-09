@@ -126,6 +126,102 @@ from searx.sxng_locales import sxng_locales
 import searx.search
 from searx.network import stream as http_stream, set_context_network_name
 from searx.search.checker import get_result as checker_get_result
+ES_URL = os.environ.get('ES_URL')
+
+def _es_request(method: str, path: str, **kwargs):
+    if not ES_URL:
+        return None
+    url = ES_URL.rstrip('/') + '/' + path.lstrip('/')
+    try:
+        resp = httpx.request(method.upper(), url, timeout=5, **kwargs)
+        if resp.status_code >= 400:
+            logger.warning(f"ES request error {resp.status_code}: {resp.text[:200]}")
+            return None
+        return resp.json()
+    except Exception as e:
+        logger.debug(f"ES request failed: {e}")
+        return None
+
+def _es_ensure_index(index_name: str = 'sga'):
+    if not ES_URL:
+        return False
+    exists = _es_request('GET', index_name)
+    if exists:
+        return True
+    mapping = {
+        "mappings": {
+            "properties": {
+                "url": {"type": "keyword"},
+                "title": {"type": "text"},
+                "content": {"type": "text"},
+                "publishedDate": {"type": "date"}
+            }
+        }
+    }
+    res = _es_request('PUT', index_name, json=mapping)
+    return bool(res)
+
+def _es_bulk_index(items, index_name: str = 'sga'):
+    if not ES_URL:
+        return False
+    if not items:
+        return True
+    lines = []
+    for it in items:
+        if not isinstance(it, dict):
+            try:
+                doc = {
+                    'url': getattr(it, 'url', ''),
+                    'title': getattr(it, 'title', '') or '',
+                    'content': getattr(it, 'content', '') or '',
+                    'publishedDate': getattr(it, 'publishedDate', None),
+                }
+            except Exception:
+                continue
+        else:
+            doc = {
+                'url': it.get('url',''),
+                'title': it.get('title','') or '',
+                'content': it.get('content','') or '',
+                'publishedDate': it.get('publishedDate')
+            }
+        lines.append(json.dumps({"index": {"_index": index_name}}, ensure_ascii=False))
+        lines.append(json.dumps(doc, ensure_ascii=False))
+    body = ('\n'.join(lines) + '\n').encode('utf-8')
+    try:
+        url = ES_URL.rstrip('/') + '/_bulk'
+        resp = httpx.post(url, content=body, headers={'Content-Type':'application/x-ndjson'}, timeout=5)
+        return resp.status_code < 400
+    except Exception:
+        return False
+
+def _es_rerank(query_text: str, index_name: str = 'sga'):
+    if not ES_URL:
+        return None
+    payload = {
+        "size": 50,
+        "query": {
+            "function_score": {
+                "query": {"multi_match": {"query": query_text, "fields": ["title^3", "content"]}},
+                "boost_mode": "sum",
+                "score_mode": "sum",
+                "functions": [
+                    {"gauss": {"publishedDate": {"origin":"now","scale":"7d","decay":0.7}}, "weight": 0.8}
+                ]
+            }
+        }
+    }
+    res = _es_request('POST', f"{index_name}/_search", json=payload)
+    if not res:
+        return None
+    hits = res.get('hits',{}).get('hits',[])
+    url2score = {}
+    for h in hits:
+        src = h.get('_source') or {}
+        u = src.get('url')
+        if u:
+            url2score[u] = h.get('_score', 0)
+    return url2score or None
 
 
 logger = logger.getChild('webapp')
@@ -1363,9 +1459,12 @@ def wechat_search():
     else:
         limit = 10
 
-    # 获取排序参数
-    sort_by_time = sxng_request.form.get('sort_by_time') or sxng_request.args.get('sort_by_time')
-    sort_by_time = sort_by_time and sort_by_time.lower() in ['true', '1', 'yes']
+    # 获取排序参数（默认 true）
+    sort_by_time_param = sxng_request.form.get('sort_by_time') or sxng_request.args.get('sort_by_time')
+    if sort_by_time_param is None:
+        sort_by_time = True
+    else:
+        sort_by_time = str(sort_by_time_param).lower() in ['true', '1', 'yes']
 
     try:
         # 创建一个包含查询参数的form对象
@@ -1392,7 +1491,11 @@ def wechat_search():
         # 添加微信相关的搜索引擎
         for engine_name in ['wechat', 'sogou wechat']:
             if engine_name in engines:
-                wechat_engines.append(EngineRef(engine_name, 'general'))
+                try:
+                    default_category = engines[engine_name].categories[0]
+                except Exception:
+                    default_category = 'general'
+                wechat_engines.append(EngineRef(engine_name, default_category))
         
         # 如果没有可用的微信引擎，返回错误
         if not wechat_engines:
@@ -1404,8 +1507,11 @@ def wechat_search():
         # 替换搜索引擎列表
         search_query.engineref_list = wechat_engines
         
+        # 解析 debug_score（用于缓存键与可选分数透出）
+        debug_score = sxng_request.form.get('debug_score') or sxng_request.args.get('debug_score')
+        debug_score = bool(debug_score and str(debug_score).lower() in ['true', '1', 'yes'])
         # 缓存键
-        cache_key = f"wechat::{query}::p1::limit={limit}::debug={debug_score}"
+        cache_key = f"wechat::{query}::p1::limit={limit}::time={int(bool(sort_by_time))}::debug={debug_score}"
         cached = _cache_get(cache_key)
         if cached is not None:
             return Response(cached, mimetype='application/json')
@@ -1414,12 +1520,32 @@ def wechat_search():
         search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
         result_container = search_obj.search()
 
-        # 去重与清洗
-        _dedupe_and_clean_results(result_container)
-        # 相关性重排（轻量级）+ 时间微偏好 + 可选透出分数（API默认仍保留新鲜度）
-        debug_score = sxng_request.form.get('debug_score') or sxng_request.args.get('debug_score')
-        debug_score = bool(debug_score and str(debug_score).lower() in ['true', '1', 'yes'])
-        _re_rank_results(query, result_container, keep_time_bias=True, include_score=debug_score)
+        # 以列表形式处理结果（避免访问不存在的 result_container.results）
+        results = result_container.get_ordered_results() or []
+        # 列表级去重/清洗/排序/重排
+        results = _dedupe_list_for_web(results)
+        try:
+            if _es_ensure_index('sga'):
+                _es_bulk_index(results, 'sga')
+                scores = _es_rerank(query, 'sga')
+                if scores:
+                    results.sort(key=lambda x: scores.get(_get_field(x,'url') or '', 0), reverse=True)
+        except Exception:
+            pass
+        results = _re_rank_results_for_web_list(query, results, keep_time_bias=True)
+        if sort_by_time:
+            results = _sort_results_list_by_time(results)
+        # 截断到 limit
+        try:
+            if limit:
+                results = results[:int(limit)]
+        except Exception:
+            pass
+        # 将排序后的结果写回容器供 JSON 输出
+        try:
+            result_container._main_results_sorted = results  # noqa: SLF001
+        except Exception:
+            pass
 
         # 返回JSON响应
         response = webutils.get_json_response(search_query, result_container)
@@ -1483,9 +1609,12 @@ def chinese_search():
     else:
         specified_engines = ['sogou', 'baidu', '360search', 'wechat']
 
-    # 获取排序参数
-    sort_by_time = sxng_request.form.get('sort_by_time') or sxng_request.args.get('sort_by_time')
-    sort_by_time = sort_by_time and sort_by_time.lower() in ['true', '1', 'yes']
+    # 获取排序参数（默认 true）
+    sort_by_time_param = sxng_request.form.get('sort_by_time') or sxng_request.args.get('sort_by_time')
+    if sort_by_time_param is None:
+        sort_by_time = True
+    else:
+        sort_by_time = str(sort_by_time_param).lower() in ['true', '1', 'yes']
 
     try:
         # 创建一个包含查询参数的form对象
@@ -1512,7 +1641,11 @@ def chinese_search():
         # 添加您指定的中文搜索引擎（按优先级排序）
         for engine_name in specified_engines:
             if engine_name in engines:
-                chinese_engines.append(EngineRef(engine_name, 'general'))
+                try:
+                    default_category = engines[engine_name].categories[0]
+                except Exception:
+                    default_category = 'general'
+                chinese_engines.append(EngineRef(engine_name, default_category))
         
         # 如果没有可用的中文引擎，返回错误
         if not chinese_engines:
@@ -1525,8 +1658,11 @@ def chinese_search():
         # 替换搜索引擎列表
         search_query.engineref_list = chinese_engines
         
+        # 解析 debug_score（用于缓存键与可选分数透出）
+        debug_score = sxng_request.form.get('debug_score') or sxng_request.args.get('debug_score')
+        debug_score = bool(debug_score and str(debug_score).lower() in ['true', '1', 'yes'])
         # 缓存键（包含引擎列表）
-        cache_key = f"chinese::{query}::p1::{'-'.join(specified_engines)}::limit={limit}::debug={debug_score}"
+        cache_key = f"chinese::{query}::p1::{'-'.join(specified_engines)}::limit={limit}::time={int(bool(sort_by_time))}::debug={debug_score}"
         cached = _cache_get(cache_key)
         if cached is not None:
             return Response(cached, mimetype='application/json')
@@ -1535,12 +1671,29 @@ def chinese_search():
         search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
         result_container = search_obj.search()
 
-        # 去重与清洗
-        _dedupe_and_clean_results(result_container)
-        # 相关性重排（轻量级）+ 时间微偏好 + 可选透出分数（API默认仍保留新鲜度）
-        debug_score = sxng_request.form.get('debug_score') or sxng_request.args.get('debug_score')
-        debug_score = bool(debug_score and str(debug_score).lower() in ['true', '1', 'yes'])
-        _re_rank_results(query, result_container, keep_time_bias=True, include_score=debug_score)
+        # 以列表形式处理结果
+        results = result_container.get_ordered_results() or []
+        results = _dedupe_list_for_web(results)
+        try:
+            if _es_ensure_index('sga'):
+                _es_bulk_index(results, 'sga')
+                scores = _es_rerank(query, 'sga')
+                if scores:
+                    results.sort(key=lambda x: scores.get(_get_field(x,'url') or '', 0), reverse=True)
+        except Exception:
+            pass
+        results = _re_rank_results_for_web_list(query, results, keep_time_bias=True)
+        if sort_by_time:
+            results = _sort_results_list_by_time(results)
+        try:
+            if limit:
+                results = results[:int(limit)]
+        except Exception:
+            pass
+        try:
+            result_container._main_results_sorted = results  # noqa: SLF001
+        except Exception:
+            pass
 
         # 返回JSON响应
         response = webutils.get_json_response(search_query, result_container)
