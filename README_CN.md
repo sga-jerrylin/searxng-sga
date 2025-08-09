@@ -4,11 +4,11 @@
 
 这是一个基于 SearXNG 深度优化的企业级搜索引擎，聚焦中文搜索、公众号专搜与平台集成，默认时间优先展示，结果更相关、更干净。
 
-### ✨ 核心特性（v1.1.0）
+### ✨ 核心特性（v1.2.0）
 
 - **📱 微信专搜API** - 专门的公众号搜索端点
 - **⏱ 时间优先** - 网页端默认按时间排序（最新优先）
-- **🔎 相关性重排** - 文本模板组内相关性重排（网页端）；API 轻量重排（可开启 `debug_score`）
+- **🔎 相关性重排** - 文本模板组内相关性重排（网页端）；API 轻量重排 + 可选 Lucene(BM25)+时间衰减
 - **🧹 结果清洁** - 列表级去重（URL 指纹 + 标题近似）、低相关过滤、标题/摘要清洗
 - **🧰 稳定性** - 微信相关 UA 轮换、指数退避重试、可选代理（`WECHAT_PROXY`）
 - **⚡ 缓存** - API 结果 60s 短期缓存（512 条）
@@ -33,6 +33,8 @@ export PYTHONPATH="$PWD" && python -m searx.webapp
 ```bash
 docker-compose up --build -d
 ```
+
+提示：如需启用 Lucene 重排，在 `docker-compose.yml` 中已默认提供 `ES_URL=http://es:9200`，确保 `es` 服务也启动即可。
 
 ### 2. 测试接口
 ```bash
@@ -115,6 +117,7 @@ GET/POST /wechat_search
 - JSON格式输出
 - 独立的API端点
 - ✅ 自动按时间排序（最新内容优先）
+- ✅ 可选 Lucene(BM25)+时间衰减重排（设置环境变量 `ES_URL` 生效）
 
 **时间排序功能：**
 - 🕐 自动获取当前时间
@@ -203,6 +206,7 @@ SearXNG-SGA 新增了强大的时间排序功能，让搜索结果自动按发�
 | **输出格式** | JSON only | JSON only | HTML/JSON |
 | **时间排序** | ✅ 自动排序 | ✅ 自动排序 | ❌ 无排序 |
 | **排序参数** | ✅ `sort_by_time` | ✅ `sort_by_time` | ❌ 无参数 |
+| **Lucene 重排** | ✅（配置 `ES_URL` 时） | ✅（配置 `ES_URL` 时） | ❌（默认关闭） |
 | **推荐场景** | 中文内容搜索 | 微信公众号内容 | 网页界面 |
 
 ## 🔧 配置说明
@@ -226,6 +230,7 @@ search:
 ### 运行建议
 - 需要更强的新鲜度时，可调高过滤阈值或限定日期
 - 若命中反爬，可配置 `WECHAT_PROXY` 并适度放宽 `limit`
+ - 若需更高相关性，建议启用 `ES_URL` 使用 Lucene(BM25) + 时间衰减
 
 ## 💻 使用示例
 
@@ -454,6 +459,53 @@ curl "http://localhost:8888/healthz"
 - [Dify工作流指南](DIFY_WORKFLOW_GUIDE.md) - 详细集成步骤
 - 使用curl命令测试API是否正常工作
 
+## ☁️ 云端部署更新指南（已在云端部署用户必读）
+
+> 场景：你已经在云服务器上部署了 v1.1.0，现在希望升级到 v1.1.1。
+>
+> 建议生产环境按“版本标签”升级，便于回滚与追踪变更。
+
+### 方式 A：按版本标签升级（推荐）
+1. SSH 登录你的云服务器并进入项目目录
+2. 拉取最新代码与标签：
+   ```bash
+   git fetch --all --tags
+   ```
+3. 切换到目标版本（示例：v1.1.1）：
+   ```bash
+   git checkout v1.1.1
+   ```
+4. 使用 Docker 重建并后台运行：
+   ```bash
+   docker-compose up --build -d
+   ```
+5. 验证服务：
+   ```bash
+   curl "http://localhost:8888/healthz"
+   ```
+
+若未使用 Docker，而是直接运行 Python，请确保：
+```bash
+pip install -r requirements.txt
+export PYTHONPATH="$PWD" && python -m searx.webapp
+```
+
+### 方式 B：跟随 master 最新提交（不固定版本）
+1. SSH 登录服务器并进入项目目录
+2. 更新到 master 最新：
+   ```bash
+   git checkout master
+   git pull --ff-only
+   ```
+3. 使用 Docker 重建并后台运行：
+   ```bash
+   docker-compose up --build -d
+   ```
+4. 验证：
+   ```bash
+   curl "http://localhost:8888/healthz"
+   ```
+
 ## 📁 文件结构
 
 项目根目录已经过清理整理，删除了重复和无用的文件。
@@ -542,11 +594,14 @@ git_push.bat
 git_setup.bat
 ```
 
-### 本版本要点（v1.1.0）
+### 本版本要点（v1.2.0）
 - Web：时间优先排序、组内相关性重排（文本）、列表级去重、低相关过滤、标题/摘要清洗
-- API：轻量相关性重排（`debug_score` 可透出）、60s 缓存、去重清洗
+- API：轻量相关性重排（`debug_score` 可透出）、60s 缓存、去重清洗；可选 Lucene(BM25)+时间衰减重排
 - 稳定性：微信 UA 轮换、退避重试、可选代理
 - 精简：移除无关脚本文档，Docker/compose 精简
+
+## 🏗 架构概览
+详见 `ARCHITECTURE_CN.md`。
 
 ## 📄 许可证
 
@@ -559,4 +614,4 @@ git_setup.bat
 
 ---
 
-🎉 **现在你拥有了一个完全适配Dify且支持微信专搜的开源隐私搜索引擎！** 
+🎉 **现在你拥有了一个完全适配Dify且支持微信专搜的开源隐私搜索引擎！**

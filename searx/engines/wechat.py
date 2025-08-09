@@ -1,5 +1,4 @@
 from urllib.parse import (
-    quote,
     urlencode,
 )
 from lxml import html
@@ -64,7 +63,7 @@ def request(query, params):
             'http': proxy,
             'https': proxy,
         }
-
+    return params
 
 def parse_url(url_string):
     try:
@@ -97,7 +96,7 @@ def parse_url2(url_string):
         backoff = 0.5
         for _ in range(3):
             resp = get(url_string, headers=headers)
-            parsed_url_list = re.findall(r"url \\+= '(.+)'", resp.text)
+            parsed_url_list = re.findall(r"url \+= '(.+)'", resp.text)
             parsed_url = ''.join(parsed_url_list)
             parsed_url = re.sub(r'@', r'', parsed_url)
             if parsed_url:

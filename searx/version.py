@@ -9,10 +9,10 @@ import importlib
 
 # fallback values
 # if there is searx.version_frozen module, and it is not possible to get the git tag
-VERSION_STRING = "1.0.0"
-VERSION_TAG = "1.0.0"
-GIT_URL = "unknow"
-GIT_BRANCH = "unknow"
+VERSION_STRING = "1.2.0"
+VERSION_TAG = "1.2.0"
+GIT_URL = "unknown"
+GIT_BRANCH = "unknown"
 
 logger = logging.getLogger("searx")
 
