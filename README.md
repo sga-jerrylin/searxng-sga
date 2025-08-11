@@ -1,69 +1,69 @@
-# SearXNG-SGA
+# SearXNG-SGA v1.2.1 — 面向智能体的中文搜索引擎（企业增强版）
 
-更懂中文、更易集成的 SearXNG 企业增强版：中文优先排序、微信公众号专搜、开箱即用的 API 与 Docker 部署。
+更懂中文、更快更干净、结果信息更“饱满”。内置微信专搜、时间优先排序、轻量正文抽取与富化返回，一次调用就能给智能体足够上下文做判断。
 
-- 中文完整文档：README_CN.md
+- 中文主文档：README_CN.md
 - License：AGPL-3.0
 
-## ✨ 本版本亮点（v1.2.0）
-- Web 前端
-  - ⏱ 默认“按时间”排序（最新优先）
-  - 🔎 组内相关性轻重排、列表级去重、标题/摘要清洗
-- API 端
-  - 🌟 新增中文搜索 API（/chinese_search）
-  - 📱 微信专搜 API（/wechat_search）
-  - ⚡ 轻量重排、60s 短缓存、可选 debug_score、可选 Lucene(BM25)+时间衰减
-- 稳定性
-  - 🧰 UA 轮换、指数退避重试、可选代理（WECHAT_PROXY）
+## ✨ 亮点（v1.2.1）
+- 中文与公众号内容优先：默认时间优先排序，近期内容权重更高
+- 微信专搜 API：稳定应对 UA 轮换、退避重试、可选代理（WECHAT_PROXY）
+- 轻量富化 expand=article：Top-K 并发抓取，抽取正文、首图/多图、小标题、命中句、提要
+- 更多返回字段：`images[]`、`snippet_sentences[]`、`bullet_points[]`、`amp_url`、`canonical_url`、`source_score`、`quality_score`
+- 缓存：查询 60s 短缓存，URL 级富化 6h 缓存
+- 可选更强重排：设置 `ES_URL` 启用 Lucene(BM25)+时间衰减
 
 ## 🚀 快速开始
-- 本地运行
-  ```bash
-  # Windows PowerShell
-  $env:PYTHONPATH="$PWD"; python -m searx.webapp
-  # Linux / macOS
-  export PYTHONPATH="$PWD" && python -m searx.webapp
-  ```
-- Docker（推荐）
-  ```bash
-  docker-compose up --build -d
-  ```
-- API 示例
-  ```bash
-  # 中文搜索（推荐）
-  curl "http://localhost:8888/chinese_search?q=人工智能&limit=10"
-  # 微信专搜
-  curl "http://localhost:8888/wechat_search?q=ChatGPT&limit=8"
-  ```
-
-## ☁️ 云端部署更新指南（已在云端部署用户）
-场景：已部署 v1.1.0，升级到 v1.1.1。
-
-方式 A：按版本标签升级（推荐）
-1) git fetch --all --tags
-2) git checkout v1.2.0
-3) docker-compose up --build -d
-4) curl http://localhost:8888/healthz
-
-方式 B：跟随 master（不固定版本）
-1) git checkout master && git pull --ff-only
-2) docker-compose up --build -d
-3) curl http://localhost:8888/healthz
-
-未使用 Docker：
+- 本地运行（Windows PowerShell）
+```powershell
+$env:PYTHONPATH="$PWD"; python -m searx.webapp
+```
+- 本地运行（Linux/macOS）
 ```bash
-pip install -r requirements.txt
 export PYTHONPATH="$PWD" && python -m searx.webapp
 ```
+- Docker（推荐）
+```bash
+docker compose up --build -d
+```
 
-## 🔗 与 Dify 的集成
-- Dify Docker 环境请使用 `http://host.docker.internal:8888`
-- 推荐 HTTP 请求节点调用 `/chinese_search`、`/wechat_search`
-- 更多示例见 README_CN.md
+## 📡 API（面向智能体）
+### 1) 中文搜索 `/chinese_search`
+- 常用参数：
+  - `q`: 关键词（必填）
+  - `limit`: 返回条数，1–100（默认10）
+  - `sort_by_time`: 是否时间优先（默认true）
+  - `expand`: `meta | article | full`（默认 meta；article 启用正文抽取与富化）
+  - `enrich_top_k`: 富化条数（默认6）
+  - `enrich_per_req_ms`: 单条富化预算（默认800ms）
+  - `enrich_timeout_ms`: 富化总预算（默认1200ms）
+  - `max_article_chars`: 正文截断（默认1500）
+  - `include`: 逗号分隔返回字段过滤，如 `article,images,quality_score`
+- 示例（浏览器直开）：
+  - 基础（meta 富化）：
+    - `http://localhost:8888/chinese_search?q=gpt5&limit=10&expand=meta&include=cover_image,site_name,quality_score`
+  - 文章抽取（Top-5，2.5s 总预算）：
+    - `http://localhost:8888/chinese_search?q=gpt5&expand=article&enrich_top_k=5&enrich_per_req_ms=1000&enrich_timeout_ms=2500&max_article_chars=2000&include=article,first_image,images,headings,summary_simple,snippet_sentences,bullet_points,amp_url,canonical_url,site_name,source_score,quality_score,reason`
 
-## 🗺️ Roadmap
-- v1.1.x：文档完善与稳定性优化
-- v1.2.x：更多中文内容源与可选更强重排策略
+### 2) 微信专搜 `/wechat_search`
+- 参数与 `chinese_search` 基本一致（无需 engines）
+- 示例（文章抽取）：
+  - `http://localhost:8888/wechat_search?q=gpt5&expand=article&enrich_top_k=4&enrich_per_req_ms=1000&enrich_timeout_ms=1800&max_article_chars=2000&include=article,first_image,images,headings,summary_simple,site_name,source_score,quality_score,reason`
 
-欢迎在 Issues 提需求或反馈问题。
+## 🤖 Dify/编排平台接入
+- 容器内访问宿主机请用：`http://host.docker.internal:8888`
+- 推荐使用 HTTP 请求节点，选择 `/chinese_search` 或 `/wechat_search`
 
+## ⚙️ 可选：Elasticsearch 重排
+- 设置 `ES_URL=http://es:9200` 即启用（docker-compose 已包含单节点）
+- API 端会将结果索引并用 BM25+时间衰减重排，相关性进一步提升
+
+## 🛠 故障排查
+- 403/JSON 问题：确保 `searx/settings.yml` 中 `search.formats` 包含 `json`
+- 微信无结果：开启代理 `WECHAT_PROXY`，适度放宽 `limit`
+- 超时：提升 `enrich_per_req_ms` 与 `enrich_timeout_ms`，或降低 `enrich_top_k`
+
+## 📄 许可证
+AGPL-3.0。网络部署需开源修改，详见 LICENSE。
+
+—— 想让智能体“一次拿全料”？试试 `expand=article + include=article,images,snippet_sentences,quality_score`！

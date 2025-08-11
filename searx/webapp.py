@@ -777,6 +777,394 @@ def _dedupe_list_for_web(results_list):
             fingerprints.append(('', ''))
     return kept
 
+# -------------------------
+# 结果富化（元数据/正文摘取/质量分）
+# -------------------------
+_ENRICH_CACHE: dict[str, tuple[float, dict]] = {}
+_ENRICH_CACHE_TTL_SEC = 6 * 3600
+_ENRICH_MAX_WORKERS = 8
+_AGG_DOMAINS = {
+    'baidu.com','www.baidu.com','m.baidu.com',
+    'weixin.sogou.com','sogou.com','www.sogou.com',
+    '360kuai.com','www.360kuai.com','so.com','www.so.com',
+    '360doc.com','www.360doc.com'
+}
+_TRUSTED_HOSTS = {
+    'openai.com', 'www.openai.com', 'openai.com',
+    'news.cctv.com', 'cctv.com', 'www.cctv.com',
+    'xinhuanet.com', 'www.xinhuanet.com',
+    'people.com.cn', 'www.people.com.cn',
+    'mp.weixin.qq.com'
+}
+
+def _host(url: str) -> str:
+    try:
+        return urllib.parse.urlparse(url or '').netloc.lower()
+    except Exception:
+        return ''
+
+def _abs_url(base: str, maybe: str | None) -> str | None:
+    if not maybe:
+        return None
+    try:
+        return urllib.parse.urljoin(base, maybe)
+    except Exception:
+        return maybe
+
+def _now() -> float:
+    return time.time()
+
+def _enrich_cache_get(key: str) -> dict | None:
+    hit = _ENRICH_CACHE.get(key)
+    if not hit:
+        return None
+    ts, val = hit
+    if _now() - ts > _ENRICH_CACHE_TTL_SEC:
+        _ENRICH_CACHE.pop(key, None)
+        return None
+    return val
+
+def _enrich_cache_set(key: str, val: dict):
+    if len(_ENRICH_CACHE) > 2000:
+        for k in list(_ENRICH_CACHE.keys())[:200]:
+            _ENRICH_CACHE.pop(k, None)
+    _ENRICH_CACHE[key] = (_now(), val)
+
+def _extract_meta(html: str, base_url: str, max_article_chars: int = 1500) -> dict:
+    from lxml import html as lhtml
+    res = {'favicon': None, 'cover_image': None, 'canonical_url': None,
+           'author': None, 'site_name': None, 'language': None,
+           'content_excerpt': None, 'word_count_est': None,
+           'amp_url': None, 'images': None}
+    try:
+        doc = lhtml.fromstring(html)
+        # lang
+        try:
+            lang = doc.xpath('string(//html/@lang)')
+            res['language'] = lang or None
+        except Exception:
+            pass
+        # meta
+        metas = { (m.get('property') or m.get('name') or '').lower(): m.get('content') for m in doc.xpath('//meta[@content]') }
+        og_img = metas.get('og:image') or metas.get('twitter:image')
+        res['cover_image'] = _abs_url(base_url, og_img)
+        res['site_name'] = metas.get('og:site_name')
+        if not res['site_name']:
+            res['site_name'] = _host(base_url)
+        res['author'] = metas.get('article:author') or metas.get('author')
+        # canonical & amp
+        try:
+            canon = doc.xpath('string(//link[translate(@rel,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")="canonical"]/@href)')
+            res['canonical_url'] = _abs_url(base_url, canon) or base_url
+        except Exception:
+            res['canonical_url'] = base_url
+        try:
+            amp = doc.xpath('string(//link[translate(@rel,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")="amphtml"]/@href)')
+            if amp:
+                res['amp_url'] = _abs_url(base_url, amp)
+        except Exception:
+            pass
+        # favicon
+        try:
+            icon = doc.xpath('string(//link[contains(translate(@rel,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"icon")]/@href)')
+            res['favicon'] = _abs_url(base_url, icon) or urllib.parse.urljoin(base_url, '/favicon.ico')
+        except Exception:
+            res['favicon'] = urllib.parse.urljoin(base_url, '/favicon.ico')
+        # excerpt（优先 meta description，否则取前若干段落）
+        desc = metas.get('description') or metas.get('og:description')
+        excerpt = ''
+        if desc:
+            excerpt = desc.strip()
+        else:
+            paras = [t.strip() for t in doc.xpath('//p//text()') if t and t.strip()]
+            excerpt = ' '.join(paras[:8])
+        excerpt = re.sub(r'\s+', ' ', excerpt).strip()
+        if max_article_chars and len(excerpt) > max_article_chars:
+            excerpt = excerpt[:max_article_chars]
+        res['content_excerpt'] = excerpt or None
+        # word count
+        if excerpt:
+            res['word_count_est'] = len(excerpt.split())
+        # images（前若干张）
+        try:
+            imgs = doc.xpath('//img/@src')
+            out = []
+            seen = set()
+            for s in imgs:
+                u = _abs_url(base_url, s)
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                out.append(u)
+                if len(out) >= 5:
+                    break
+            if out:
+                res['images'] = out
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return {k:v for k,v in res.items() if v}
+
+def _extract_article(html: str, base_url: str, max_article_chars: int = 1500) -> dict:
+    """使用 readability 抽取正文与首图、标题等，失败回退为空。
+    返回字段：article, first_image, headings, summary_simple
+    """
+    data = {}
+    try:
+        try:
+            from readability import Document  # type: ignore
+        except Exception:
+            return data
+        from lxml import html as lhtml
+        doc = Document(html)
+        summary_html = doc.summary() or ''
+        if not summary_html:
+            return data
+        node = lhtml.fromstring(summary_html)
+        # 正文文本
+        texts = [t.strip() for t in node.xpath('//text()') if t and t.strip()]
+        article_text = re.sub(r'\s+', ' ', ' '.join(texts)).strip()
+        if max_article_chars and len(article_text) > max_article_chars:
+            article_text = article_text[:max_article_chars]
+        if article_text:
+            data['article'] = article_text
+        # 首图 & 正文内多图
+        try:
+            imgs = node.xpath('//img/@src')
+            imgs_abs = []
+            seen = set()
+            for s in imgs:
+                u = _abs_url(base_url, s)
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                imgs_abs.append(u)
+                if len(imgs_abs) >= 5:
+                    break
+            if imgs_abs:
+                data['first_image'] = imgs_abs[0]
+                data['images'] = imgs_abs
+        except Exception:
+            pass
+        # 标题/小标题
+        try:
+            headings = []
+            for tag in ['h1','h2','h3']:
+                headings.extend([re.sub(r'\s+',' ', (t or '').strip()) for t in node.xpath(f'//{tag}//text()')])
+            headings = [h for h in headings if h]
+            if headings:
+                data['headings'] = headings[:8]
+        except Exception:
+            pass
+        # 简摘要：按句号切几句
+        try:
+            blob = data.get('article') or ''
+            if blob:
+                # 支持中英文简单切句
+                parts = re.split(r'[。\.\!\?]', blob)
+                parts = [p.strip() for p in parts if p and p.strip()]
+                if parts:
+                    data['summary_simple'] = '。'.join(parts[:3])
+        except Exception:
+            pass
+    except Exception:
+        return {}
+    return data
+
+def _quality_score(url: str, title: str | None, content: str | None, enriched: dict, is_agg: bool) -> tuple[float, list[str]]:
+    score = 0.0
+    reasons = []
+    try:
+        if url.startswith('https://'):
+            score += 0.1; reasons.append('HTTPS')
+        if title:
+            score += min(0.3, len(title)/80.0*0.3); reasons.append('标题长度')
+        if content:
+            score += min(0.2, len(content)/200.0*0.2); reasons.append('摘要长度')
+        if enriched.get('cover_image'):
+            score += 0.1; reasons.append('有封面图')
+        if enriched.get('author'):
+            score += 0.05; reasons.append('有作者')
+        if enriched.get('content_excerpt') and len(enriched['content_excerpt']) > 200:
+            score += 0.15; reasons.append('正文摘取')
+        if enriched.get('canonical_url'):
+            score += 0.05; reasons.append('canonical')
+        if is_agg:
+            score -= 0.2; reasons.append('聚合域降权')
+    except Exception:
+        pass
+    return (round(max(0.0, min(score, 1.0)), 3), reasons)
+
+def _source_score(url: str) -> float:
+    try:
+        h = _host(url)
+        if h in _TRUSTED_HOSTS:
+            return 0.9
+        if h in _AGG_DOMAINS:
+            return 0.2
+        if url.startswith('https://'):
+            return 0.6
+    except Exception:
+        pass
+    return 0.5
+
+def _fetch_meta_quick(url: str, timeout: float, proxy: str | None, max_article_chars: int) -> dict:
+    cache_key = f"enrich::{url}"
+    hit = _enrich_cache_get(cache_key)
+    if hit is not None:
+        return dict(hit)
+    try:
+        headers = {
+            'User-Agent': gen_useragent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Cache-Control': 'no-cache',
+        }
+        kwargs = {'headers': headers, 'timeout': timeout, 'follow_redirects': True}
+        if proxy:
+            kwargs['proxies'] = {'all://': proxy}
+        resp = httpx.get(url, **kwargs)
+        if resp.status_code >= 400 or not resp.text:
+            return {}
+        enriched = _extract_meta(resp.text, resp.url.geturl(), max_article_chars=max_article_chars)
+        _enrich_cache_set(cache_key, enriched)
+        return dict(enriched)
+    except Exception:
+        return {}
+
+def _fetch_article_quick(url: str, timeout: float, proxy: str | None, max_article_chars: int) -> dict:
+    """获取页面并做 meta + article 抽取（轻量），失败回退 meta-only。
+    """
+    cache_key = f"enrich_article::{url}"
+    hit = _enrich_cache_get(cache_key)
+    if hit is not None:
+        return dict(hit)
+    try:
+        headers = {
+            'User-Agent': gen_useragent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Cache-Control': 'no-cache',
+        }
+        kwargs = {'headers': headers, 'timeout': timeout, 'follow_redirects': True}
+        if proxy:
+            kwargs['proxies'] = {'all://': proxy}
+        resp = httpx.get(url, **kwargs)
+        if resp.status_code >= 400 or not resp.text:
+            return {}
+        base = resp.url.geturl()
+        enriched = _extract_meta(resp.text, base, max_article_chars=max_article_chars)
+        art = _extract_article(resp.text, base, max_article_chars=max_article_chars)
+        if art:
+            enriched.update(art)
+        _enrich_cache_set(cache_key, enriched)
+        return dict(enriched)
+    except Exception:
+        return {}
+
+def _enrich_urls(urls: list[str], expand: str, top_k: int, budget_ms: int, per_req_timeout: float, max_article_chars: int) -> dict[str, dict]:
+    if expand not in ('meta','content','full','article'):
+        return {}
+    start = _now()
+    left_ms = lambda: max(0, budget_ms - int((_now()-start)*1000))
+    proxy = os.environ.get('WECHAT_PROXY') or None
+    todo = urls[:max(1, min(top_k, len(urls)))]
+    out: dict[str, dict] = {}
+    if not todo or budget_ms <= 0:
+        return out
+    def worker(u):
+        if left_ms() <= 0:
+            return (u, {})
+        to = min(per_req_timeout, left_ms()/1000.0 + 0.05)
+        if expand in ('article','full'):
+            enriched = _fetch_article_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
+            # 若失败回退 meta
+            if not enriched:
+                enriched = _fetch_meta_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
+        else:
+            enriched = _fetch_meta_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
+        return (u, enriched)
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        workers = min(_ENRICH_MAX_WORKERS, len(todo))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(worker, u) for u in todo]
+            for f in as_completed(futs, timeout=max(0.1, budget_ms/1000.0 + 0.1)):
+                u, enriched = f.result() if not f.cancelled() else (None, {})
+                if u and enriched:
+                    out[u] = enriched
+                if left_ms() <= 0:
+                    break
+    except Exception:
+        pass
+    return out
+
+def _apply_enrichment_to_json(json_text: str, url2enriched: dict[str, dict], include_fields: set[str] | None, query_text: str | None) -> str:
+    try:
+        data = json.loads(json_text)
+        results = data.get('results') or []
+        # 预处理查询词 tokens
+        tokens = []
+        if query_text:
+            alnum = re.findall(r"[A-Za-z0-9]{2,}", query_text)
+            cjk = re.findall(r"[\u4e00-\u9fff]{1,}", query_text)
+            tokens = list({t.lower() for t in (alnum + cjk)})
+        for it in results:
+            u = it.get('url')
+            if not u:
+                continue
+            enriched = url2enriched.get(u)
+            if not enriched:
+                continue
+            # 质量分
+            is_agg = _host(u) in _AGG_DOMAINS
+            q, reasons = _quality_score(u, it.get('title'), it.get('content'), enriched, is_agg)
+            payload = dict(enriched)
+            payload['is_aggregator'] = bool(is_agg)
+            payload['quality_score'] = q
+            payload['reason'] = reasons
+            # 来源分
+            payload['source_score'] = _source_score(u)
+            # 生成 snippet_sentences（从 article 或 content_excerpt 挑命中句）
+            try:
+                blob = payload.get('article') or payload.get('content_excerpt') or ''
+                if blob and tokens:
+                    # 简单句切分
+                    parts = re.split(r'[。！？.!?]\s*', blob)
+                    parts = [p.strip() for p in parts if p and p.strip()]
+                    hits = []
+                    for s in parts:
+                        low = s.lower()
+                        if any(tok in low for tok in tokens):
+                            hits.append(s)
+                            if len(hits) >= 3:
+                                break
+                    if hits:
+                        payload['snippet_sentences'] = hits
+            except Exception:
+                pass
+            # bullet_points（基于 headings 或首段）
+            try:
+                if 'headings' in payload and payload['headings']:
+                    payload['bullet_points'] = payload['headings'][:3]
+                else:
+                    blob = payload.get('article') or payload.get('content_excerpt') or ''
+                    if blob:
+                        parts = re.split(r'[。；;]\s*', blob)
+                        parts = [p.strip() for p in parts if p and p.strip()]
+                        if parts:
+                            payload['bullet_points'] = parts[:3]
+            except Exception:
+                pass
+            # 字段选择
+            if include_fields:
+                payload = {k:v for k,v in payload.items() if k in include_fields or k in ('is_aggregator','quality_score','reason','source_score')}
+            it.update(payload)
+        return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+    except Exception:
+        return json_text
+
 warnings.simplefilter("always")
 
 # about static
@@ -1547,8 +1935,39 @@ def wechat_search():
         except Exception:
             pass
 
-        # 返回JSON响应
+        # 新增：富化参数解析与执行
+        expand = (sxng_request.form.get('expand') or sxng_request.args.get('expand') or 'meta').lower()
+        enrich_top_k = int(sxng_request.form.get('enrich_top_k') or sxng_request.args.get('enrich_top_k') or 6)
+        enrich_timeout_ms = int(sxng_request.form.get('enrich_timeout_ms') or sxng_request.args.get('enrich_timeout_ms') or 1200)
+        enrich_per_req_ms = int(sxng_request.form.get('enrich_per_req_ms') or sxng_request.args.get('enrich_per_req_ms') or 800)
+        enrich_per_req_ms = int(sxng_request.form.get('enrich_per_req_ms') or sxng_request.args.get('enrich_per_req_ms') or 800)
+        max_article_chars = int(sxng_request.form.get('max_article_chars') or sxng_request.args.get('max_article_chars') or 1500)
+        include_param = sxng_request.form.get('include') or sxng_request.args.get('include') or ''
+        include_fields = set([s.strip() for s in include_param.split(',') if s.strip()]) if include_param else None
+
+        # 仅对 Top-K 且排除聚合域并发富化
+        urls = []
+        for r in results:
+            u = _get_field(r, 'url') or ''
+            if not u:
+                continue
+            if _host(u) in _AGG_DOMAINS:
+                continue
+            urls.append(u)
+            if len(urls) >= enrich_top_k:
+                break
+        url2enriched = _enrich_urls(
+            urls,
+            expand=expand,
+            top_k=enrich_top_k,
+            budget_ms=enrich_timeout_ms,
+            per_req_timeout=max(0.2, min(2.0, enrich_per_req_ms/1000.0)),
+            max_article_chars=max_article_chars,
+        )
+
+        # 返回JSON响应并合并富化字段
         response = webutils.get_json_response(search_query, result_container)
+        response = _apply_enrichment_to_json(response, url2enriched, include_fields, query)
         _cache_set(cache_key, response)
         return Response(response, mimetype='application/json')
 
@@ -1695,8 +2114,35 @@ def chinese_search():
         except Exception:
             pass
 
-        # 返回JSON响应
+        # 新增：富化参数解析与执行
+        expand = (sxng_request.form.get('expand') or sxng_request.args.get('expand') or 'meta').lower()
+        enrich_top_k = int(sxng_request.form.get('enrich_top_k') or sxng_request.args.get('enrich_top_k') or 6)
+        enrich_timeout_ms = int(sxng_request.form.get('enrich_timeout_ms') or sxng_request.args.get('enrich_timeout_ms') or 1200)
+        max_article_chars = int(sxng_request.form.get('max_article_chars') or sxng_request.args.get('max_article_chars') or 1500)
+        include_param = sxng_request.form.get('include') or sxng_request.args.get('include') or ''
+        include_fields = set([s.strip() for s in include_param.split(',') if s.strip()]) if include_param else None
+
+        urls = []
+        for r in results:
+            u = _get_field(r, 'url') or ''
+            if not u:
+                continue
+            if _host(u) in _AGG_DOMAINS:
+                continue
+            urls.append(u)
+            if len(urls) >= enrich_top_k:
+                break
+        url2enriched = _enrich_urls(
+            urls,
+            expand=expand,
+            top_k=enrich_top_k,
+            budget_ms=enrich_timeout_ms,
+            per_req_timeout=max(0.2, min(2.0, enrich_per_req_ms/1000.0)),
+            max_article_chars=max_article_chars,
+        )
+
         response = webutils.get_json_response(search_query, result_container)
+        response = _apply_enrichment_to_json(response, url2enriched, include_fields, query)
         _cache_set(cache_key, response)
         return Response(response, mimetype='application/json')
 

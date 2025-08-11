@@ -4,7 +4,7 @@
 
 这是一个基于 SearXNG 深度优化的企业级搜索引擎，聚焦中文搜索、公众号专搜与平台集成，默认时间优先展示，结果更相关、更干净。
 
-### ✨ 核心特性（v1.2.0）
+### ✨ 核心特性（v1.2.1）
 
 - **📱 微信专搜API** - 专门的公众号搜索端点
 - **⏱ 时间优先** - 网页端默认按时间排序（最新优先）
@@ -12,6 +12,9 @@
 - **🧹 结果清洁** - 列表级去重（URL 指纹 + 标题近似）、低相关过滤、标题/摘要清洗
 - **🧰 稳定性** - 微信相关 UA 轮换、指数退避重试、可选代理（`WECHAT_PROXY`）
 - **⚡ 缓存** - API 结果 60s 短期缓存（512 条）
+- **📰 轻量正文抽取（expand=article）** - Top-K 并发富化，抽取正文、首图/多图、小标题、命中句、提要
+- **📦 更多返回字段** - `article`、`images[]`、`snippet_sentences[]`、`bullet_points[]`、`amp_url`、`canonical_url`、`source_score`、`quality_score`
+- **🚀 更强推荐实践** - 一次调用拿到“可判别”的信息，减少二段抓取与 LLM 决策等待
 
 ## 🚀 快速开始
 
@@ -36,15 +39,18 @@ docker-compose up --build -d
 
 提示：如需启用 Lucene 重排，在 `docker-compose.yml` 中已默认提供 `ES_URL=http://es:9200`，确保 `es` 服务也启动即可。
 
-### 2. 测试接口
+### 2. 测试接口（含富化参数）
 ```bash
-# 测试中文搜索API（推荐）
-curl "http://localhost:8888/chinese_search?q=人工智能&limit=10"
+# 中文搜索（meta 富化，前10条）
+curl "http://localhost:8888/chinese_search?q=gpt5&limit=10&expand=meta&include=cover_image,site_name,quality_score"
 
-# 测试微信专搜API
-curl "http://localhost:8888/wechat_search?q=ChatGPT&limit=8"
+# 中文搜索（文章抽取 Top-5，2.5s 总预算，返回正文/多图/提要/命中句等）
+curl "http://localhost:8888/chinese_search?q=gpt5&expand=article&enrich_top_k=5&enrich_per_req_ms=1000&enrich_timeout_ms=2500&max_article_chars=2000&include=article,first_image,images,headings,summary_simple,snippet_sentences,bullet_points,amp_url,canonical_url,site_name,source_score,quality_score,reason"
 
-# 测试通用搜索API
+# 微信专搜（文章抽取 Top-4，1.8s 总预算）
+curl "http://localhost:8888/wechat_search?q=gpt5&expand=article&enrich_top_k=4&enrich_per_req_ms=1000&enrich_timeout_ms=1800&max_article_chars=2000&include=article,first_image,images,headings,summary_simple,site_name,source_score,quality_score,reason"
+
+# 通用搜索（兼容接口）
 curl "http://localhost:8888/search?q=人工智能&format=json"
 ```
 
@@ -58,13 +64,22 @@ curl "http://localhost:8888/search?q=人工智能&format=json"
 GET/POST /chinese_search
 ```
 
-**功能：** 使用优质中文搜索引擎进行搜索，自动按时间排序
+**功能：** 使用优质中文搜索引擎进行搜索，自动按时间排序；支持富化返回
 
-**参数：**
+**核心参数：**
 - `q` (必需): 搜索关键词
 - `limit` (可选): 返回结果数量 (1-100，默认10)
 - `engines` (可选): 指定搜索引擎，用逗号分隔 (默认: sogou,baidu,360search,wechat)
 - `sort_by_time` (可选): 是否按时间排序 (默认true，从最新到最旧)
+- `expand` (可选): `meta | article | full`（默认 meta；article 启用正文抽取与富化）
+- `enrich_top_k` (可选): 富化的 Top-K（默认6）
+- `enrich_per_req_ms` (可选): 单条富化预算（默认800ms，建议 800–1200）
+- `enrich_timeout_ms` (可选): 富化总预算（默认1200ms）
+- `max_article_chars` (可选): 正文截断（默认1500，建议 1500–3000）
+- `include` (可选): 逗号分隔返回字段过滤（如 `article,images,quality_score`）
+
+**新增/增强字段：**
+- `article`, `first_image`, `images[]`, `headings`, `summary_simple`, `snippet_sentences[]`, `bullet_points[]`, `amp_url`, `canonical_url`, `source_score`, `quality_score`, `reason[]`
 
 **特点：**
 - ✅ 锁定优质中文搜索引擎
@@ -104,12 +119,18 @@ curl "http://localhost:8888/chinese_search?q=人工智能&limit=20&sort_by_time=
 GET/POST /wechat_search
 ```
 
-**功能：** 专门搜索微信公众号内容，自动按时间排序
+**功能：** 专门搜索微信公众号内容，自动按时间排序；支持富化返回
 
-**参数：**
+**核心参数：**
 - `q` (必需): 搜索关键词
 - `limit` (可选): 返回结果数量 (1-100，默认10)
 - `sort_by_time` (可选): 是否按时间排序 (默认true，从最新到最旧)
+- `expand` (可选): `meta | article | full`（默认 meta；article 启用正文抽取与富化）
+- 其余富化参数与 `/chinese_search` 一致
+
+**建议：**
+- 命中反爬时配置 `WECHAT_PROXY`
+- 聚合/跳转域默认不做正文抓取，预算集中在高价值域
 
 **特点：**
 - 专门搜索微信公众号文章
@@ -227,10 +248,12 @@ search:
 - name: sogou wechat     # 搜狗微信搜索（备用）
 ```
 
-### 运行建议
-- 需要更强的新鲜度时，可调高过滤阈值或限定日期
-- 若命中反爬，可配置 `WECHAT_PROXY` 并适度放宽 `limit`
- - 若需更高相关性，建议启用 `ES_URL` 使用 Lucene(BM25) + 时间衰减
+### 运行建议（最佳实践）
+- 小而快：`expand=meta` + `include=cover_image,site_name,quality_score`
+- 一次拿全料：`expand=article` + `enrich_top_k=5` + `enrich_per_req_ms=1000` + `enrich_timeout_ms=2500` + `include=article,images,snippet_sentences,quality_score`
+- 限时稳妥：保持 Top-K 小（3~5），适度提高单条/总预算；命中缓存后会更快
+- 微信反爬：配置 `WECHAT_PROXY` 并适度放宽 `limit`
+- 更强重排：设置 `ES_URL` 启用 Lucene(BM25)+时间衰减
 
 ## 💻 使用示例
 

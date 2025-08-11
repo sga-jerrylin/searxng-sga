@@ -9,8 +9,8 @@ import importlib
 
 # fallback values
 # if there is searx.version_frozen module, and it is not possible to get the git tag
-VERSION_STRING = "1.2.0"
-VERSION_TAG = "1.2.0"
+VERSION_STRING = "1.3.0"
+VERSION_TAG = "1.3.0"
 GIT_URL = "unknown"
 GIT_BRANCH = "unknown"
 
