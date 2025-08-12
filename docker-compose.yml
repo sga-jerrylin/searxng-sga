@@ -42,6 +42,7 @@ services:
     depends_on:
       - redis
       - es
+      - simple-crawler
     restart: unless-stopped
     networks:
       - searxng-net
@@ -70,6 +71,24 @@ services:
       - searxng-net
     volumes:
       - esdata:/usr/share/elasticsearch/data
+
+  simple-crawler:
+    build:
+      context: .
+      dockerfile: simple-crawler.dockerfile
+    container_name: simple-crawler
+    ports:
+      - "3002:3002"
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    networks:
+      - searxng-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
 
 volumes:
   redis-data:

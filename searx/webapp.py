@@ -101,6 +101,19 @@ from searx.preferences import (
     ClientPref,
     ValidationException,
 )
+
+def _clean_query_string(query: str) -> str:
+    """清理查询字符串，移除非法字符和控制字符"""
+    if not query:
+        return query
+
+    # 移除控制字符（包括换行符、制表符等）
+    import re
+    # 保留基本的空格，移除其他控制字符
+    cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', query)
+    # 规范化空白字符
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
 import searx.answerers
 import searx.plugins
 
@@ -533,7 +546,7 @@ def _calc_item_relevance(query_text: str, item) -> float:
     return rel + time_bonus
 
 
-def _filter_low_relevance_for_web(query_text: str, items: list, min_score: float) -> list:
+def _filter_low_relevance_for_web(query_text: str, items: list, min_score: float, is_web_interface: bool = True) -> list:
     if not items:
         return items
     # 从查询中提取必须命中的关键片段
@@ -565,9 +578,15 @@ def _filter_low_relevance_for_web(query_text: str, items: list, min_score: float
             except Exception:
                 host = ''
             is_agg = host in AGG_HOSTS
-            # 聚合/跳转站点更严格
-            if (score >= min_score and must_ok) or (not is_agg and score >= (min_score - 0.15) and must_ok):
-                filtered.append(it)
+            # 网页端更宽松，API端相对严格
+            if is_web_interface:
+                # 网页端：更宽松的过滤，优先展示更多结果
+                if (score >= min_score and must_ok) or (not is_agg and score >= (min_score - 0.2) and must_ok) or (score >= 0.1):
+                    filtered.append(it)
+            else:
+                # API端：保持相对严格的质量控制
+                if (score >= min_score and must_ok) or (not is_agg and score >= (min_score - 0.15) and must_ok):
+                    filtered.append(it)
         else:
             filtered.append(it)
     return filtered
@@ -907,36 +926,79 @@ def _extract_meta(html: str, base_url: str, max_article_chars: int = 1500) -> di
     return {k:v for k,v in res.items() if v}
 
 def _extract_article(html: str, base_url: str, max_article_chars: int = 1500) -> dict:
-    """使用 readability 抽取正文与首图、标题等，失败回退为空。
+    """使用 readability 抽取正文与首图、标题等，失败回退为简单抽取。
     返回字段：article, first_image, headings, summary_simple
     """
     data = {}
     try:
+        # 首先尝试使用 readability
         try:
             from readability import Document  # type: ignore
+            from lxml import html as lhtml
+            doc = Document(html)
+            summary_html = doc.summary() or ''
+            if summary_html:
+                node = lhtml.fromstring(summary_html)
+                # 正文文本
+                texts = [t.strip() for t in node.xpath('//text()') if t and t.strip()]
+                article_text = re.sub(r'\s+', ' ', ' '.join(texts)).strip()
+                if max_article_chars and len(article_text) > max_article_chars:
+                    article_text = article_text[:max_article_chars]
+                if article_text:
+                    data['article'] = article_text
         except Exception:
-            return data
-        from lxml import html as lhtml
-        doc = Document(html)
-        summary_html = doc.summary() or ''
-        if not summary_html:
-            return data
-        node = lhtml.fromstring(summary_html)
-        # 正文文本
-        texts = [t.strip() for t in node.xpath('//text()') if t and t.strip()]
-        article_text = re.sub(r'\s+', ' ', ' '.join(texts)).strip()
-        if max_article_chars and len(article_text) > max_article_chars:
-            article_text = article_text[:max_article_chars]
-        if article_text:
-            data['article'] = article_text
-        # 首图 & 正文内多图
+            # readability 失败，使用简单的文本抽取作为fallback
+            from lxml import html as lhtml
+            try:
+                doc = lhtml.fromstring(html)
+                # 尝试从常见的内容标签中抽取文本
+                content_selectors = [
+                    '//article//text()',
+                    '//div[contains(@class,"content")]//text()',
+                    '//div[contains(@class,"article")]//text()',
+                    '//div[contains(@id,"content")]//text()',
+                    '//main//text()',
+                    '//p//text()'
+                ]
+
+                for selector in content_selectors:
+                    texts = [t.strip() for t in doc.xpath(selector) if t and t.strip()]
+                    if texts:
+                        article_text = re.sub(r'\s+', ' ', ' '.join(texts)).strip()
+                        if len(article_text) > 100:  # 确保有足够的内容
+                            if max_article_chars and len(article_text) > max_article_chars:
+                                article_text = article_text[:max_article_chars]
+                            data['article'] = article_text
+                            break
+            except Exception:
+                pass
+        # 首图 & 正文内多图 - 改进图片抽取逻辑
         try:
-            imgs = node.xpath('//img/@src')
+            from lxml import html as lhtml
+            # 如果有readability结果，优先使用
+            if 'article' in data:
+                try:
+                    node = lhtml.fromstring(summary_html)
+                    imgs = node.xpath('//img/@src')
+                except:
+                    imgs = []
+            else:
+                # 否则从原始HTML中抽取
+                try:
+                    doc = lhtml.fromstring(html)
+                    # 优先从内容区域抽取图片
+                    imgs = doc.xpath('//article//img/@src | //div[contains(@class,"content")]//img/@src | //main//img/@src | //img/@src')
+                except:
+                    imgs = []
+
             imgs_abs = []
             seen = set()
             for s in imgs:
                 u = _abs_url(base_url, s)
                 if not u or u in seen:
+                    continue
+                # 过滤掉明显的装饰性图片
+                if any(x in u.lower() for x in ['icon', 'logo', 'avatar', 'button', 'banner']) and 'content' not in u.lower():
                     continue
                 seen.add(u)
                 imgs_abs.append(u)
@@ -996,6 +1058,57 @@ def _quality_score(url: str, title: str | None, content: str | None, enriched: d
         pass
     return (round(max(0.0, min(score, 1.0)), 3), reasons)
 
+# 新的简洁富化系统 - 基于simple-crawler
+def enrich_with_crawler(url: str) -> dict:
+    """使用simple-crawler进行内容富化"""
+    try:
+        import requests
+
+        # 尝试多种方式连接simple-crawler
+        crawler_urls = [
+            'http://host.docker.internal:3002/v0/scrape',  # Docker Desktop
+            'http://172.17.0.1:3002/v0/scrape',           # Docker默认网关
+            'http://simple-crawler:3002/v0/scrape'         # 容器间网络
+        ]
+
+        response = None
+        for crawler_url in crawler_urls:
+            try:
+                response = requests.post(
+                    crawler_url,
+                    json={'url': url},
+                    timeout=5,
+                    headers={'Content-Type': 'application/json'}
+                )
+                if response.status_code == 200:
+                    break
+            except:
+                continue
+
+        if response and response.status_code == 200:
+            data = response.json()
+            if data.get('success') and data.get('data'):
+                result = data['data']
+                content = result.get('content', '') or result.get('markdown', '')
+
+                if content and len(content.strip()) > 20:  # 确保有实际内容
+                    return {
+                        'title': result.get('title', ''),
+                        'content': content[:1500],  # 限制长度
+                        'content_excerpt': content[:1500],  # 用于富化处理
+                        'article': content[:1500],  # 用于富化处理
+                        'site_name': 'Crawler Enhanced',
+                        'canonical_url': url,
+                        'source_score': _source_score(url),
+                        'quality_score': 0.9,
+                        'reason': ['crawler_enhanced']
+                    }
+    except:
+        pass
+
+    return None
+
+
 def _source_score(url: str) -> float:
     try:
         h = _host(url)
@@ -1015,11 +1128,14 @@ def _fetch_meta_quick(url: str, timeout: float, proxy: str | None, max_article_c
     if hit is not None:
         return dict(hit)
     try:
+        # 使用更通用的User-Agent，减少被拒绝的可能性
         headers = {
-            'User-Agent': gen_useragent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Cache-Control': 'no-cache',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
         kwargs = {'headers': headers, 'timeout': timeout, 'follow_redirects': True}
         if proxy:
@@ -1035,36 +1151,69 @@ def _fetch_meta_quick(url: str, timeout: float, proxy: str | None, max_article_c
 
 def _fetch_article_quick(url: str, timeout: float, proxy: str | None, max_article_chars: int) -> dict:
     """获取页面并做 meta + article 抽取（轻量），失败回退 meta-only。
+    增加重试机制和更好的错误处理。
     """
     cache_key = f"enrich_article::{url}"
     hit = _enrich_cache_get(cache_key)
     if hit is not None:
         return dict(hit)
-    try:
-        headers = {
-            'User-Agent': gen_useragent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Cache-Control': 'no-cache',
-        }
-        kwargs = {'headers': headers, 'timeout': timeout, 'follow_redirects': True}
-        if proxy:
-            kwargs['proxies'] = {'all://': proxy}
-        resp = httpx.get(url, **kwargs)
-        if resp.status_code >= 400 or not resp.text:
+
+    # 重试机制
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            # 使用更通用的User-Agent，减少被拒绝的可能性
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            # 动态调整超时时间
+            actual_timeout = timeout * (0.7 if attempt > 0 else 1.0)
+            kwargs = {'headers': headers, 'timeout': actual_timeout, 'follow_redirects': True}
+            if proxy:
+                kwargs['proxies'] = {'all://': proxy}
+
+            resp = httpx.get(url, **kwargs)
+            if resp.status_code >= 400 or not resp.text:
+                if attempt < max_retries:
+                    continue
+                return {}
+
+            base = resp.url.geturl()
+            enriched = _extract_meta(resp.text, base, max_article_chars=max_article_chars)
+            art = _extract_article(resp.text, base, max_article_chars=max_article_chars)
+            if art:
+                enriched.update(art)
+
+            # 只有成功获取到内容才缓存
+            if enriched:
+                _enrich_cache_set(cache_key, enriched)
+            return dict(enriched)
+
+        except (httpx.TimeoutException, httpx.ConnectTimeout, httpx.ReadTimeout):
+            if attempt < max_retries:
+                continue
+            # 超时时回退到meta-only
+            try:
+                return _fetch_meta_quick(url, timeout * 0.5, proxy, max_article_chars)
+            except:
+                return {}
+        except Exception:
+            if attempt < max_retries:
+                continue
             return {}
-        base = resp.url.geturl()
-        enriched = _extract_meta(resp.text, base, max_article_chars=max_article_chars)
-        art = _extract_article(resp.text, base, max_article_chars=max_article_chars)
-        if art:
-            enriched.update(art)
-        _enrich_cache_set(cache_key, enriched)
-        return dict(enriched)
-    except Exception:
-        return {}
+
+    return {}
 
 def _enrich_urls(urls: list[str], expand: str, top_k: int, budget_ms: int, per_req_timeout: float, max_article_chars: int) -> dict[str, dict]:
+    print(f"[DEBUG] _enrich_urls被调用，URLs数量: {len(urls)}, expand: {expand}, top_k: {top_k}")
+    logger.info(f"[ENRICH_URLS] 开始富化，URLs数量: {len(urls)}, expand: {expand}, top_k: {top_k}")
     if expand not in ('meta','content','full','article'):
+        logger.warning(f"[ENRICH_URLS] 无效的expand参数: {expand}")
         return {}
     start = _now()
     left_ms = lambda: max(0, budget_ms - int((_now()-start)*1000))
@@ -1072,18 +1221,58 @@ def _enrich_urls(urls: list[str], expand: str, top_k: int, budget_ms: int, per_r
     todo = urls[:max(1, min(top_k, len(urls)))]
     out: dict[str, dict] = {}
     if not todo or budget_ms <= 0:
+        logger.warning(f"[ENRICH_URLS] 没有URL需要处理或预算为0: todo={len(todo)}, budget_ms={budget_ms}")
         return out
+
+    logger.info(f"[ENRICH_URLS] 准备处理URLs: {todo}")
+
+    # 添加基本的富化信息作为fallback
+    def create_basic_enrichment(url: str) -> dict:
+        """创建基本的富化信息作为fallback"""
+        try:
+            parsed = urllib.parse.urlparse(url)
+            domain = parsed.netloc.lower()
+            return {
+                'site_name': domain,
+                'canonical_url': url,
+                'source_score': _source_score(url),
+                'quality_score': 0.5,  # 默认质量分
+                'reason': ['basic_fallback']
+            }
+        except:
+            return {}
+
+
     def worker(u):
+        logger.info(f"[ENRICHMENT] 开始处理URL: {u}")
         if left_ms() <= 0:
-            return (u, {})
+            logger.info(f"[ENRICHMENT] 超时，使用基本富化: {u}")
+            return (u, create_basic_enrichment(u))
+
         to = min(per_req_timeout, left_ms()/1000.0 + 0.05)
-        if expand in ('article','full'):
-            enriched = _fetch_article_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
-            # 若失败回退 meta
+        enriched = {}
+
+        try:
+            # 优先使用simple-crawler进行富化
+            enriched = enrich_with_crawler(u)
+
+            # 如果crawler失败，使用原有方法作为fallback
             if not enriched:
-                enriched = _fetch_meta_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
-        else:
-            enriched = _fetch_meta_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
+                if expand in ('article','full'):
+                    enriched = _fetch_article_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
+                    if not enriched:
+                        enriched = _fetch_meta_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
+                else:
+                    enriched = _fetch_meta_quick(u, timeout=to, proxy=proxy, max_article_chars=max_article_chars)
+        except Exception:
+            enriched = None
+
+        # 如果所有方法都失败，使用基本富化信息
+        if not enriched:
+            logger.info(f"[ENRICHMENT] 所有方法失败，使用基本富化: {u}")
+            enriched = create_basic_enrichment(u)
+
+        logger.info(f"[ENRICHMENT] 完成处理: {u}, 有内容: {bool(enriched)}")
         return (u, enriched)
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1649,6 +1838,14 @@ def search():
             )
         return index_error(output_format, 'No query'), 400
 
+    # 清理查询字符串，移除非法字符
+    original_query = sxng_request.form.get('q')
+    cleaned_query = _clean_query_string(original_query)
+    if cleaned_query != original_query:
+        # 如果查询被清理了，更新form中的查询
+        sxng_request.form = sxng_request.form.copy()
+        sxng_request.form['q'] = cleaned_query
+
     # search
     search_query = None
     raw_text_query = None
@@ -1699,20 +1896,44 @@ def search():
     previous_result = None
 
     results = result_container.get_ordered_results()
-    # 列表级去重（标题/URL）+ 过滤低相关 + 时间优先排序 + 组内相关性（文本模板）
-    results = _dedupe_list_for_web(results)
-    results = _filter_low_relevance_for_web(search_query.query, results, min_score=0.8)
-    results = _sort_results_list_by_time(results)
-    results = _re_rank_results_for_web_list(search_query.query, results, keep_time_bias=True)
-    # 网页端：清洗文本噪声，提升可读性
-    for result in results:
-        if output_format == 'html':
-            if 'content' in result and result['content']:
-                result['content'] = _clean_text_noise(result['content'])
-                result['content'] = highlight_content(escape(result['content'][:1024]), search_query.query)
-            if 'title' in result and result['title']:
-                result['title'] = _clean_text_noise(result['title'])
-                result['title'] = highlight_content(escape(result['title'] or ''), search_query.query)
+
+    # 改进的网页端结果处理流程
+    if results:
+        # 1. 列表级去重（标题/URL）
+        results = _dedupe_list_for_web(results)
+
+        # 2. 过滤低相关结果（网页端使用宽松阈值）
+        results = _filter_low_relevance_for_web(search_query.query, results, min_score=0.1, is_web_interface=True)
+
+        # 3. 智能排序：结合时间和相关性
+        # 首先按相关性重排
+        results = _re_rank_results_for_web_list(search_query.query, results, keep_time_bias=True)
+
+        # 4. 如果用户没有明确指定排序方式，默认时间优先（中文搜索习惯）
+        sort_by_time = sxng_request.form.get('time_range') or sxng_request.args.get('sort') == 'time'
+        if not sxng_request.form.get('sort') and not sxng_request.args.get('sort'):
+            # 默认时间优先，但保持一定的相关性权重
+            results = _sort_results_list_by_time(results)
+
+        # 5. 网页端：清洗文本噪声，提升可读性
+        for result in results:
+            if output_format == 'html':
+                if 'content' in result and result['content']:
+                    result['content'] = _clean_text_noise(result['content'])
+                    result['content'] = highlight_content(escape(result['content'][:1024]), search_query.query)
+                if 'title' in result and result['title']:
+                    result['title'] = _clean_text_noise(result['title'])
+                    result['title'] = highlight_content(escape(result['title'] or ''), search_query.query)
+
+                # 6. 为网页端添加更多有用信息
+                if 'publishedDate' in result and result['publishedDate']:
+                    # 格式化发布时间显示
+                    try:
+                        from datetime import datetime
+                        if isinstance(result['publishedDate'], datetime):
+                            result['formatted_date'] = result['publishedDate'].strftime('%Y-%m-%d')
+                    except:
+                        pass
 
     if search_query.redirect_to_first_result and results:
         return redirect(results[0]['url'], 302)
@@ -1721,7 +1942,7 @@ def search():
     _re_rank_results_for_web(search_query.query, result_container, keep_time_bias=True, include_score=False)
     results = result_container.get_ordered_results()
     results = _dedupe_list_for_web(results)
-    results = _filter_low_relevance_for_web(search_query.query, results, min_score=0.8)
+    results = _filter_low_relevance_for_web(search_query.query, results, min_score=0.2, is_web_interface=True)
     results = _sort_results_list_by_time(results)
     results = _re_rank_results_for_web_list(search_query.query, results, keep_time_bias=True)
 
@@ -1835,6 +2056,9 @@ def wechat_search():
             'message': '请提供搜索关键词'
         }), 400
 
+    # 清理查询字符串，移除非法字符
+    query = _clean_query_string(query)
+
     # 获取返回条数限制
     limit = sxng_request.form.get('limit') or sxng_request.args.get('limit')
     if limit:
@@ -1845,7 +2069,7 @@ def wechat_search():
         except ValueError:
             limit = 10
     else:
-        limit = 10
+        limit = 20  # 增加默认返回数量
 
     # 获取排序参数（默认 true）
     sort_by_time_param = sxng_request.form.get('sort_by_time') or sxng_request.args.get('sort_by_time')
@@ -1904,14 +2128,31 @@ def wechat_search():
         if cached is not None:
             return Response(cached, mimetype='application/json')
 
-        # 执行搜索
-        search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
-        result_container = search_obj.search()
+        # 执行搜索，带重试机制
+        results = []
+        max_retries = 3
+        retry_count = 0
 
-        # 以列表形式处理结果（避免访问不存在的 result_container.results）
-        results = result_container.get_ordered_results() or []
+        while retry_count < max_retries and not results:
+            search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
+            result_container = search_obj.search()
+
+            # 以列表形式处理结果（避免访问不存在的 result_container.results）
+            results = result_container.get_ordered_results() or []
+
+            if not results:
+                retry_count += 1
+                if retry_count < max_retries:
+                    # 短暂等待后重试，避免过于频繁的请求
+                    import time
+                    time.sleep(0.5 * retry_count)  # 递增等待时间
+                    logger.warning(f'WeChat search returned empty results, retrying ({retry_count}/{max_retries})')
+                else:
+                    logger.warning('WeChat search failed after all retries, returning empty results')
         # 列表级去重/清洗/排序/重排
         results = _dedupe_list_for_web(results)
+        # API端过滤：使用宽松的阈值，确保返回足够结果
+        results = _filter_low_relevance_for_web(query, results, min_score=0.1, is_web_interface=False)
         try:
             if _es_ensure_index('sga'):
                 _es_bulk_index(results, 'sga')
@@ -1939,7 +2180,6 @@ def wechat_search():
         expand = (sxng_request.form.get('expand') or sxng_request.args.get('expand') or 'meta').lower()
         enrich_top_k = int(sxng_request.form.get('enrich_top_k') or sxng_request.args.get('enrich_top_k') or 6)
         enrich_timeout_ms = int(sxng_request.form.get('enrich_timeout_ms') or sxng_request.args.get('enrich_timeout_ms') or 1200)
-        enrich_per_req_ms = int(sxng_request.form.get('enrich_per_req_ms') or sxng_request.args.get('enrich_per_req_ms') or 800)
         enrich_per_req_ms = int(sxng_request.form.get('enrich_per_req_ms') or sxng_request.args.get('enrich_per_req_ms') or 800)
         max_article_chars = int(sxng_request.form.get('max_article_chars') or sxng_request.args.get('max_article_chars') or 1500)
         include_param = sxng_request.form.get('include') or sxng_request.args.get('include') or ''
@@ -2003,11 +2243,15 @@ def chinese_search():
     
     # 检查是否有查询参数
     query = sxng_request.form.get('q') or sxng_request.args.get('q')
+    print(f"[DEBUG] chinese_search被调用，query: {query}")
     if not query:
         return jsonify({
             'error': 'No query provided',
             'message': '请提供搜索关键词'
         }), 400
+
+    # 清理查询字符串，移除非法字符
+    query = _clean_query_string(query)
 
     # 获取返回条数限制
     limit = sxng_request.form.get('limit') or sxng_request.args.get('limit')
@@ -2017,9 +2261,9 @@ def chinese_search():
             # 限制范围在1-100之间
             limit = max(1, min(100, limit))
         except ValueError:
-            limit = 10
+            limit = 20  # 增加默认返回数量
     else:
-        limit = 10
+        limit = 20  # 增加默认返回数量
 
     # 获取指定的搜索引擎
     specified_engines = sxng_request.form.get('engines') or sxng_request.args.get('engines')
@@ -2086,13 +2330,30 @@ def chinese_search():
         if cached is not None:
             return Response(cached, mimetype='application/json')
 
-        # 执行搜索
-        search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
-        result_container = search_obj.search()
+        # 执行搜索，带重试机制
+        results = []
+        max_retries = 3
+        retry_count = 0
 
-        # 以列表形式处理结果
-        results = result_container.get_ordered_results() or []
+        while retry_count < max_retries and not results:
+            search_obj = searx.search.SearchWithPlugins(search_query, sxng_request, sxng_request.user_plugins)
+            result_container = search_obj.search()
+
+            # 以列表形式处理结果
+            results = result_container.get_ordered_results() or []
+
+            if not results:
+                retry_count += 1
+                if retry_count < max_retries:
+                    # 短暂等待后重试，避免过于频繁的请求
+                    import time
+                    time.sleep(0.5 * retry_count)  # 递增等待时间
+                    logger.warning(f'Chinese search returned empty results, retrying ({retry_count}/{max_retries})')
+                else:
+                    logger.warning('Chinese search failed after all retries, returning empty results')
         results = _dedupe_list_for_web(results)
+        # API端过滤：使用宽松的阈值，确保返回足够结果
+        results = _filter_low_relevance_for_web(query, results, min_score=0.1, is_web_interface=False)
         try:
             if _es_ensure_index('sga'):
                 _es_bulk_index(results, 'sga')
@@ -2114,35 +2375,35 @@ def chinese_search():
         except Exception:
             pass
 
-        # 新增：富化参数解析与执行
+        # 简化的富化系统
         expand = (sxng_request.form.get('expand') or sxng_request.args.get('expand') or 'meta').lower()
-        enrich_top_k = int(sxng_request.form.get('enrich_top_k') or sxng_request.args.get('enrich_top_k') or 6)
-        enrich_timeout_ms = int(sxng_request.form.get('enrich_timeout_ms') or sxng_request.args.get('enrich_timeout_ms') or 1200)
-        max_article_chars = int(sxng_request.form.get('max_article_chars') or sxng_request.args.get('max_article_chars') or 1500)
-        include_param = sxng_request.form.get('include') or sxng_request.args.get('include') or ''
-        include_fields = set([s.strip() for s in include_param.split(',') if s.strip()]) if include_param else None
+        enrich_top_k = int(sxng_request.form.get('enrich_top_k') or sxng_request.args.get('enrich_top_k') or 3)
 
-        urls = []
-        for r in results:
-            u = _get_field(r, 'url') or ''
-            if not u:
-                continue
-            if _host(u) in _AGG_DOMAINS:
-                continue
-            urls.append(u)
-            if len(urls) >= enrich_top_k:
-                break
-        url2enriched = _enrich_urls(
-            urls,
-            expand=expand,
-            top_k=enrich_top_k,
-            budget_ms=enrich_timeout_ms,
-            per_req_timeout=max(0.2, min(2.0, enrich_per_req_ms/1000.0)),
-            max_article_chars=max_article_chars,
-        )
+        # 收集需要富化的URLs
+        urls_to_enrich = []
+        for r in results[:enrich_top_k]:
+            url = _get_field(r, 'url') or ''
+            if url and _host(url) not in _AGG_DOMAINS:
+                urls_to_enrich.append(url)
+
+        # 使用simple-crawler进行富化
+        url2enriched = {}
+        if expand in ('full', 'article', 'content') and urls_to_enrich:
+            logger.warning(f"[ENRICHMENT] 开始富化 {len(urls_to_enrich)} 个URL: {urls_to_enrich}")
+            for url in urls_to_enrich:
+                enriched = enrich_with_crawler(url)
+                if enriched:
+                    url2enriched[url] = enriched
+                    logger.warning(f"[ENRICHMENT] 富化成功: {url}")
+                else:
+                    logger.warning(f"[ENRICHMENT] 富化失败: {url}")
+        else:
+            logger.warning(f"[ENRICHMENT] 跳过富化: expand={expand}, urls_to_enrich={len(urls_to_enrich) if urls_to_enrich else 0}")
 
         response = webutils.get_json_response(search_query, result_container)
-        response = _apply_enrichment_to_json(response, url2enriched, include_fields, query)
+        logger.warning(f"[ENRICHMENT] 应用富化前: url2enriched有{len(url2enriched)}个条目")
+        response = _apply_enrichment_to_json(response, url2enriched, None, query)
+        logger.warning(f"[ENRICHMENT] 应用富化后: 响应长度{len(response)}")
         _cache_set(cache_key, response)
         return Response(response, mimetype='application/json')
 
